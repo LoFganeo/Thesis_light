@@ -1,31 +1,44 @@
-import { sql } from '@vercel/postgres';
+import { createPool } from '@vercel/postgres';
 
-export default async function handler(request, response) {
-  // 确保是 POST 请求
+export const config = {
+  runtime: 'edge',
+};
+
+export default async function handler(request) {
   if (request.method !== 'POST') {
-    return response.status(405).json({ error: 'Method Not Allowed' });
+    return new Response(JSON.stringify({ error: 'Method Not Allowed' }), {
+      status: 405,
+      headers: { 'Content-Type': 'application/json' },
+    });
   }
 
-  try {
-    // 从请求体中解析数据
-    const { participantId, audioTime, currentMode, lastSwitchTime } = request.body;
+  const pool = createPool({
+    connectionString: process.env.POSTGRES_URL,
+  });
 
-    // 简单的数据验证
-    if (!participantId || audioTime === undefined || !currentMode || lastSwitchTime === undefined) {
-      return response.status(400).json({ error: 'Missing required fields' });
+  try {
+    const { participantId, audioTime, currentMode, lastSwitchTime } = await request.json();
+    
+    if (!participantId) {
+      return new Response(JSON.stringify({ error: 'participantId is required' }), {
+        status: 400,
+        headers: { 'Content-Type': 'application/json' },
+      });
     }
 
-    // 将数据插入数据库
-    await sql`
+    await pool.sql`
       INSERT INTO thesis_logs (participant_id, audio_time, current_mode, last_switch_time)
       VALUES (${participantId}, ${audioTime}, ${currentMode}, ${lastSwitchTime});
     `;
-
-    // 返回成功响应
-    return response.status(200).json({ message: 'Log saved successfully' });
-
+    
+    return new Response(JSON.stringify({ message: 'Log saved' }), {
+      status: 200,
+      headers: { 'Content-Type': 'application/json' },
+    });
   } catch (error) {
-    console.error('Error saving log:', error);
-    return response.status(500).json({ error: 'Internal Server Error' });
+    return new Response(JSON.stringify({ error: error.message }), {
+      status: 500,
+      headers: { 'Content-Type': 'application/json' },
+    });
   }
 }

@@ -1,18 +1,25 @@
-import { sql } from '@vercel/postgres';
+import { createPool } from '@vercel/postgres';
 
-export default async function handler(request, response) {
-  if (request.method !== 'GET') {
-    return response.status(405).json({ error: 'Method Not Allowed' });
-  }
+export const config = {
+  runtime: 'edge',
+};
+
+export default async function handler(request) {
+  const pool = createPool({
+    connectionString: process.env.POSTGRES_URL,
+  });
 
   try {
-    const { rows } = await sql`
-      SELECT DISTINCT participant_id FROM thesis_logs;
-    `;
-    const usedSeatIds = rows.map(r => r.participant_id);
-    return response.status(200).json(usedSeatIds);
+    const { rows } = await pool.sql`SELECT DISTINCT participant_id FROM thesis_logs;`;
+    const usedSeats = rows.map(r => r.participant_id);
+    return new Response(JSON.stringify(usedSeats), {
+      status: 200,
+      headers: { 'Content-Type': 'application/json' },
+    });
   } catch (error) {
-    console.error('Error fetching used seats:', error);
-    return response.status(500).json({ error: 'Internal Server Error' });
+    return new Response(JSON.stringify({ error: error.message }), {
+      status: 500,
+      headers: { 'Content-Type': 'application/json' },
+    });
   }
 }

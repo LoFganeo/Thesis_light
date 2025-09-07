@@ -505,7 +505,7 @@ window.addEventListener('DOMContentLoaded', () => {
   #offset-panel{position:fixed;top:168px;left:24px;z-index:2250;padding:10px 14px;display:none;background:rgba(30,32,40,0.98);border:1px solid rgba(255,255,255,0.35);box-shadow:0 8px 28px #000c}
   
   /* Seat Selection Overlay */
-  #seat-overlay{position:fixed;top:0;left:0;width:100%;height:100%;background:rgba(10,12,18,0.98);z-index:9999;display:flex;flex-direction:column;align-items:center;justify-content:center;color:#fff;font-family:sans-serif;backdrop-filter:blur(8px);-webkit-backdrop-filter:blur(8px);}
+  #seat-overlay{position:fixed;top:0;left:0;width:100%;height:100%;background:rgba(10,12,18,0.98);z-index:9999;display:flex;flex-direction:column;align-items:center;justify-content:flex-start;padding-top:15vh;color:#fff;font-family:sans-serif;backdrop-filter:blur(8px);-webkit-backdrop-filter:blur(8px);}
   #seat-overlay h1{font-weight:300;letter-spacing:2px;margin-bottom:10px;}
   #seat-overlay p{opacity:0.8;margin-top:0;margin-bottom:40px;}
   #seat-grid{display:grid;grid-template-columns:repeat(10, 1fr);gap:12px;max-width:600px;}
@@ -764,8 +764,8 @@ window.addEventListener('DOMContentLoaded', () => {
     const overlay = document.createElement('div');
     overlay.id = 'seat-overlay';
     overlay.innerHTML = `
-      <h1>请选择一个座位</h1>
-      <p>选择一个白色方块开始实验。红色方块代表已被占用。</p>
+      <h1>Please select a seat</h1>
+      <p>Select a white square to begin the experiment. Red squares are already taken.</p>
       <div id="seat-grid"></div>
     `;
     document.body.appendChild(overlay);
@@ -799,7 +799,7 @@ window.addEventListener('DOMContentLoaded', () => {
       })
       .catch(err => {
         console.error("Could not fetch used seats.", err);
-        grid.innerHTML = `<p style="color:#e55073;">无法加载座位信息，请刷新页面重试。</p>`;
+        grid.innerHTML = `<p style="color:#e55073;">Could not load seat information. Please refresh the page to try again.</p>`;
       });
   }
 

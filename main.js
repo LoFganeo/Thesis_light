@@ -4,6 +4,8 @@ let bandAccum = [0,0,0,0,0];
 const decayRate = 0.92; // B模式下能量衰减系数
 // === 全局能量-音频同步偏移 ===
 let offsetMs = 0;
+let participantId = null; // 将由座位选择器设置
+let lastSwitchTime = 0;   // 将在模式切换时更新
 
 // Marker pulse overlay (Space key visual feedback)
 let markerPulse = null; // { start: millis(), duration: 900 }
@@ -501,6 +503,15 @@ window.addEventListener('DOMContentLoaded', () => {
   #sample-panel select{color:#fff;background:rgba(255,255,255,0.08);border:1px solid rgba(255,255,255,0.2);border-radius:10px;padding:6px 10px;outline:none}
   #mode-panel{position:fixed;top:86px;left:24px;z-index:2250;padding:10px 14px;display:none;background:rgba(30,32,40,0.98);border:1px solid rgba(255,255,255,0.35);box-shadow:0 8px 28px #000c}
   #offset-panel{position:fixed;top:168px;left:24px;z-index:2250;padding:10px 14px;display:none;background:rgba(30,32,40,0.98);border:1px solid rgba(255,255,255,0.35);box-shadow:0 8px 28px #000c}
+  
+  /* Seat Selection Overlay */
+  #seat-overlay{position:fixed;top:0;left:0;width:100%;height:100%;background:rgba(10,12,18,0.98);z-index:9999;display:flex;flex-direction:column;align-items:center;justify-content:center;color:#fff;font-family:sans-serif;backdrop-filter:blur(8px);-webkit-backdrop-filter:blur(8px);}
+  #seat-overlay h1{font-weight:300;letter-spacing:2px;margin-bottom:10px;}
+  #seat-overlay p{opacity:0.8;margin-top:0;margin-bottom:40px;}
+  #seat-grid{display:grid;grid-template-columns:repeat(10, 1fr);gap:12px;max-width:600px;}
+  .seat-box{width:40px;height:40px;background:rgba(255,255,255,0.1);border:1px solid rgba(255,255,255,0.2);border-radius:8px;display:flex;align-items:center;justify-content:center;font-weight:600;cursor:pointer;transition:all .18s ease;}
+  .seat-box.available:hover{background:#4ecdc4;color:#111;transform:scale(1.1);}
+  .seat-box.used{background:#e55073;color:rgba(255,255,255,0.5);cursor:not-allowed;opacity:0.5;}
   `;
   document.head.appendChild(style);
 
@@ -570,6 +581,9 @@ window.addEventListener('DOMContentLoaded', () => {
   const mappingABtn = document.getElementById('mapping-a-btn');
   const mappingBBtn = document.getElementById('mapping-b-btn');
   function setMapping(mode){
+    if (window.audio) {
+      lastSwitchTime = window.audio.currentTime;
+    }
     if (mode === 'A') {
       mappingMode = 'A';
     } else {
@@ -673,7 +687,42 @@ window.addEventListener('DOMContentLoaded', () => {
   hueSlider.oninput = (e)=>{ colorHueOffset = parseInt(e.target.value); };
   hueRandBtn.onclick = ()=>{ colorHueOffset = (colorHueOffset + Math.floor(Math.random()*90+10)) % 360; hueSlider.value = colorHueOffset; };
 
-  function triggerMarkerPulse(){ markerPulse = { start: millis(), duration: 450 }; } // faster pulse (was 900ms)
+  function logAndTriggerPulse() {
+    // Trigger visual pulse immediately
+    markerPulse = { start: millis(), duration: 450 };
+
+    // If no seat is selected or audio is not playing, do not log
+    if (!participantId || !window.audio || window.audio.paused) {
+      console.warn('Log attempt failed: No participant ID or audio not playing.');
+      return;
+    }
+
+    const logData = {
+      participantId: participantId,
+      audioTime: window.audio.currentTime,
+      currentMode: mappingMode,
+      lastSwitchTime: lastSwitchTime
+    };
+
+    // Send data to the server
+    fetch('/api/log', {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify(logData),
+    })
+    .then(response => {
+      if (!response.ok) {
+        console.error('Failed to save log', response.statusText);
+      } else {
+        console.log('Log saved:', logData);
+      }
+    })
+    .catch(error => {
+      console.error('Error sending log:', error);
+    });
+  }
 
   // Hold-to-show (Backquote) + shortcuts
   let backquoteHeld = false;
@@ -693,8 +742,8 @@ window.addEventListener('DOMContentLoaded', () => {
     if (e.key==='['){ const os = document.getElementById('offset-slider'); const ov = document.getElementById('offset-value'); if (os && ov){ offsetMs = Math.max(-2000, offsetMs-50); os.value = offsetMs; ov.textContent = offsetMs; } }
     // Enter toggles play/pause
     if (e.code==='Enter' || e.key==='Enter'){ e.preventDefault(); togglePlay(); }
-    // Space triggers marker pulse only
-    if (e.code==='Space' || e.key===' '){ e.preventDefault(); triggerMarkerPulse(); }
+    // Space triggers marker pulse and logs data
+    if (e.code==='Space' || e.key===' '){ e.preventDefault(); logAndTriggerPulse(); }
     if (e.key==='u' || e.key==='U'){
       const anyVisible = samplePanel.style.display !== 'none' || colorToolbar.style.display !== 'none' || playFab.style.display !== 'none' || modePanel.style.display !== 'none' || offsetPanel.style.display !== 'none';
       const disp = anyVisible ? 'none' : '';
@@ -710,4 +759,50 @@ window.addEventListener('DOMContentLoaded', () => {
       || e.keyCode === 192 || e.which === 192;
     if (isBackquote) { backquoteHeld = false; hideHiddenPanels(); }
   });
+
+  function setupSeatSelection() {
+    const overlay = document.createElement('div');
+    overlay.id = 'seat-overlay';
+    overlay.innerHTML = `
+      <h1>请选择一个座位</h1>
+      <p>选择一个白色方块开始实验。红色方块代表已被占用。</p>
+      <div id="seat-grid"></div>
+    `;
+    document.body.appendChild(overlay);
+    const grid = document.getElementById('seat-grid');
+
+    fetch('/api/get-used-seats')
+      .then(res => {
+        if (!res.ok) throw new Error(`API responded with ${res.status}`);
+        return res.json();
+      })
+      .then(usedSeats => {
+        for (let i = 1; i <= 100; i++) {
+          const seatId = `seat-${i}`;
+          const seat = document.createElement('div');
+          seat.className = 'seat-box';
+          seat.textContent = i;
+          seat.dataset.id = seatId;
+
+          if (usedSeats.includes(seatId)) {
+            seat.classList.add('used');
+          } else {
+            seat.classList.add('available');
+            seat.onclick = () => {
+              participantId = seatId;
+              console.log(`Seat selected: ${participantId}`);
+              document.body.removeChild(overlay);
+            };
+          }
+          grid.appendChild(seat);
+        }
+      })
+      .catch(err => {
+        console.error("Could not fetch used seats.", err);
+        grid.innerHTML = `<p style="color:#e55073;">无法加载座位信息，请刷新页面重试。</p>`;
+      });
+  }
+
+  setupSeatSelection();
+
 }); // end DOMContentLoaded

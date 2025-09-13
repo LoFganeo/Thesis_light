@@ -498,7 +498,7 @@ window.addEventListener('DOMContentLoaded', () => {
   #play-fab:hover{background:rgba(255,255,255,0.12)}
 
   /* New panels */
-  #sample-panel{position:fixed;top:16px;left:24px;z-index:2250;padding:10px 14px;background:rgba(30,32,40,0.98);border:1px solid rgba(255,255,255,0.35);box-shadow:0 8px 28px #000c}
+  #sample-panel{position:fixed;top:16px;left:24px;z-index:2250;padding:10px 14px;background:rgba(30,32,40,0.98);border:1px solid rgba(255,255,255,0.35);box-shadow:0 8px 28px #000c;display:none}
   #sample-panel label{color:#fff;opacity:.9;font-weight:600;letter-spacing:1px;margin-right:8px}
   #sample-panel select{color:#fff;background:rgba(255,255,255,0.08);border:1px solid rgba(255,255,255,0.2);border-radius:10px;padding:6px 10px;outline:none}
   #mode-panel{position:fixed;top:86px;left:24px;z-index:2250;padding:10px 14px;display:none;background:rgba(30,32,40,0.98);border:1px solid rgba(255,255,255,0.35);box-shadow:0 8px 28px #000c}
@@ -512,6 +512,179 @@ window.addEventListener('DOMContentLoaded', () => {
   .seat-box{width:40px;height:40px;background:rgba(255,255,255,0.1);border:1px solid rgba(255,255,255,0.2);border-radius:8px;display:flex;align-items:center;justify-content:center;font-weight:600;cursor:pointer;transition:all .18s ease;}
   .seat-box.available:hover{background:#4ecdc4;color:#111;transform:scale(1.1);}
   .seat-box.used{background:#e55073;color:rgba(255,255,255,0.5);cursor:not-allowed;opacity:0.5;}
+
+  /* Welcome Screen */
+  #welcome-overlay {
+    position: fixed;
+    top: 0;
+    left: 0;
+    width: 100%;
+    height: 100%;
+    background: #000;
+    z-index: 10000;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    flex-direction: column;
+    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+    color: #fff;
+    text-align: center;
+    padding: 20px;
+    box-sizing: border-box;
+    opacity: 1;
+    transition: opacity 0.5s ease-out;
+  }
+  #welcome-overlay.hidden {
+    opacity: 0;
+    pointer-events: none;
+  }
+  .welcome-content {
+    max-width: 680px;
+  }
+  .welcome-title {
+    font-size: 56px;
+    font-weight: 600;
+    margin-bottom: 20px;
+    color: #fff;
+    text-shadow:
+      0 0 7px #fff,
+      0 0 10px #fff,
+      0 0 21px #fff,
+      0 0 42px #4ecdc4,
+      0 0 82px #4ecdc4,
+      0 0 92px #4ecdc4,
+      0 0 102px #4ecdc4,
+      0 0 151px #4ecdc4;
+  }
+  .welcome-text {
+    font-size: 18px;
+    line-height: 1.6;
+    color: rgba(255, 255, 255, 0.8);
+    margin: 20px 0;
+  }
+  .welcome-text strong {
+    color: #4ecdc4;
+    font-weight: 600;
+  }
+  .welcome-button {
+    margin-top: 40px;
+    padding: 15px 30px;
+    font-size: 18px;
+    font-weight: 600;
+    color: #000;
+    background-color: #fff;
+    border: none;
+    border-radius: 12px;
+    cursor: pointer;
+    transition: transform 0.2s ease, background-color 0.2s ease;
+  }
+  .welcome-button:hover {
+    background-color: #f0f0f0;
+    transform: scale(1.05);
+  }
+
+  /* Guided Tour Bubbles - Unified Design */
+  .tour-bubble-base {
+    position: fixed;
+    background: rgba(30,32,40,0.96);
+    backdrop-filter: saturate(1.1) blur(12px);
+    -webkit-backdrop-filter: saturate(1.1) blur(12px);
+    border: 1px solid rgba(78, 205, 196, 0.3);
+    color: #fff;
+    padding: 12px 18px;
+    border-radius: 14px;
+    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+    font-weight: 500;
+    font-size: 14px;
+    z-index: 9000;
+    opacity: 0;
+    transform: scale(0.8) translateY(8px);
+    transition: opacity 0.4s cubic-bezier(0.2, 1, 0.3, 1), transform 0.4s cubic-bezier(0.2, 1, 0.3, 1);
+    pointer-events: none;
+    white-space: nowrap;
+    box-shadow: 
+      0 8px 32px rgba(0,0,0,0.4),
+      0 2px 8px rgba(78, 205, 196, 0.1),
+      inset 0 1px 0 rgba(255,255,255,0.1);
+  }
+  .tour-bubble-base.visible {
+    opacity: 1;
+    transform: scale(1) translateY(0);
+    pointer-events: auto;
+  }
+  .tour-bubble-base::before {
+    content: '';
+    position: absolute;
+    inset: 0;
+    background: linear-gradient(135deg, rgba(78, 205, 196, 0.05), rgba(78, 205, 196, 0.02));
+    border-radius: 14px;
+    pointer-events: none;
+  }
+
+  #tour-bubble {
+    top: 28px;
+    right: 84px; /* Position next to the play button */
+  }
+  #tour-bubble::after { /* The arrow pointing right */
+    content: '';
+    position: absolute;
+    top: 50%;
+    left: 100%;
+    margin-top: -8px;
+    border-width: 8px;
+    border-style: solid;
+    border-color: transparent transparent transparent rgba(30,32,40,0.96);
+    filter: drop-shadow(1px 0 2px rgba(0,0,0,0.2));
+  }
+
+  #hue-bubble {
+    left: 288px; /* Position to the right of the Hue panel (24px + 240px + 24px) */
+    bottom: 24px; /* Align with the bottom of the Hue panel */
+  }
+  #hue-bubble::after { /* The arrow pointing left */
+    content: '';
+    position: absolute;
+    top: 50%;
+    right: 100%;
+    margin-top: -8px;
+    border-width: 8px;
+    border-style: solid;
+    border-color: transparent rgba(30,32,40,0.96) transparent transparent;
+    filter: drop-shadow(-1px 0 2px rgba(0,0,0,0.2));
+  }
+
+  /* Countdown Overlay */
+  #countdown-overlay {
+    position: fixed;
+    top: 0;
+    left: 0;
+    width: 100%;
+    height: 100%;
+    background: rgba(0, 0, 0, 0.9);
+    z-index: 9998;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+    color: #fff;
+    font-size: 18vw;
+    font-weight: 200;
+    opacity: 0;
+    pointer-events: none;
+    transition: opacity 0.3s ease;
+  }
+  #countdown-overlay.visible {
+    opacity: 1;
+  }
+  #countdown-number {
+    transform: scale(0.5);
+    opacity: 0;
+    transition: transform 0.45s cubic-bezier(0.2, 1, 0.3, 1), opacity 0.45s ease;
+  }
+  #countdown-number.show {
+    transform: scale(1);
+    opacity: 1;
+  }
   `;
   document.head.appendChild(style);
 
@@ -576,6 +749,32 @@ window.addEventListener('DOMContentLoaded', () => {
     </div>
   `;
   document.body.appendChild(offsetPanel);
+
+  // New: Guided Tour Bubble
+  const tourBubble = document.createElement('div');
+  tourBubble.id = 'tour-bubble';
+  tourBubble.className = 'tour-bubble-base';
+  tourBubble.innerHTML = 'Click here to start the experience';
+  document.body.appendChild(tourBubble);
+
+  // New: Hue Guided Tour Bubble
+  const hueBubble = document.createElement('div');
+  hueBubble.id = 'hue-bubble';
+  hueBubble.className = 'tour-bubble-base';
+  hueBubble.innerHTML = 'Try changing colors with this control';
+  document.body.appendChild(hueBubble);
+
+  // New: Countdown Overlay
+  const countdownOverlay = document.createElement('div');
+  countdownOverlay.id = 'countdown-overlay';
+  countdownOverlay.innerHTML = '<div id="countdown-number"></div>';
+  document.body.appendChild(countdownOverlay);
+
+  // --- LOGIC ---
+
+  // Randomize starting mode
+  mappingMode = Math.random() < 0.5 ? 'A' : 'B';
+  console.log(`Starting with random mode: ${mappingMode}`);
 
   // Mapping buttons
   const mappingABtn = document.getElementById('mapping-a-btn');
@@ -657,7 +856,49 @@ window.addEventListener('DOMContentLoaded', () => {
   function playCSV(){ if (!csvPlaying){ csvPlaying = true; csvInterval = setInterval(()=>{ if (energyLoaded && csvPlaying){ energyFrame = (energyFrame + 1) % energyData.length; } }, 1000/csvFps); } }
   function pauseCSV(){ csvPlaying = false; if (csvInterval) clearInterval(csvInterval); }
   function setPlayIcon(){ playFab.textContent = (audio && !audio.paused && audioLoaded) ? '❚❚' : '▶'; }
-  function togglePlay(){ if (!audioLoaded) return; if (audio.paused){ audio.play(); } else { audio.pause(); } setPlayIcon(); }
+  function togglePlay(){
+    if (!audioLoaded) return;
+
+    // Hide both tour bubbles when play is clicked for the first time
+    if (tourBubble.classList.contains('visible')) {
+      tourBubble.classList.remove('visible');
+    }
+    if (hueBubble.classList.contains('visible')) {
+      hueBubble.classList.remove('visible');
+    }
+
+    if (audio.paused){
+      // --- Countdown Logic ---
+      const countdownNumber = document.getElementById('countdown-number');
+      countdownOverlay.classList.add('visible');
+      let count = 3;
+
+      const showNumber = (num) => {
+        countdownNumber.textContent = num;
+        countdownNumber.classList.add('show');
+        setTimeout(() => {
+          countdownNumber.classList.remove('show');
+        }, 650); // Number stays visible for 650ms
+      };
+
+      const countdownInterval = setInterval(() => {
+        if (count > 0) {
+          showNumber(count);
+          count--;
+        } else {
+          clearInterval(countdownInterval);
+          countdownOverlay.classList.remove('visible');
+          // Start actual playback after countdown
+          audio.play();
+          setPlayIcon();
+        }
+      }, 1000); // Tick every second
+
+    } else {
+      audio.pause();
+      setPlayIcon();
+    }
+  }
   if (sampleSelect){
     sampleSelect.onchange = () => {
       if (audio){ audio.pause(); audio.currentTime = 0; audio.onended = null; }
@@ -726,8 +967,8 @@ window.addEventListener('DOMContentLoaded', () => {
 
   // Hold-to-show (Backquote) + shortcuts
   let backquoteHeld = false;
-  function showHiddenPanels(){ modePanel.style.display = 'block'; offsetPanel.style.display = 'block'; }
-  function hideHiddenPanels(){ modePanel.style.display = 'none'; offsetPanel.style.display = 'none'; }
+  function showHiddenPanels(){ samplePanel.style.display = 'block'; modePanel.style.display = 'block'; offsetPanel.style.display = 'block'; }
+  function hideHiddenPanels(){ samplePanel.style.display = 'none'; modePanel.style.display = 'none'; offsetPanel.style.display = 'none'; }
 
   window.addEventListener('keydown', (e)=>{
     const isBackquote = (e.code === 'Backquote')
@@ -745,9 +986,8 @@ window.addEventListener('DOMContentLoaded', () => {
     // Space triggers marker pulse and logs data
     if (e.code==='Space' || e.key===' '){ e.preventDefault(); logAndTriggerPulse(); }
     if (e.key==='u' || e.key==='U'){
-      const anyVisible = samplePanel.style.display !== 'none' || colorToolbar.style.display !== 'none' || playFab.style.display !== 'none' || modePanel.style.display !== 'none' || offsetPanel.style.display !== 'none';
+      const anyVisible = colorToolbar.style.display !== 'none' || playFab.style.display !== 'none';
       const disp = anyVisible ? 'none' : '';
-      samplePanel.style.display = disp;
       colorToolbar.style.display = disp;
       playFab.style.display = disp;
       if (disp === 'none') { hideHiddenPanels(); }
@@ -792,6 +1032,11 @@ window.addEventListener('DOMContentLoaded', () => {
               participantId = seatId;
               console.log(`Seat selected: ${participantId}`);
               document.body.removeChild(overlay);
+              // Show both guided tour bubbles after seat selection
+              setTimeout(() => {
+                tourBubble.classList.add('visible');
+                hueBubble.classList.add('visible');
+              }, 300);
             };
           }
           grid.appendChild(seat);
@@ -803,6 +1048,42 @@ window.addEventListener('DOMContentLoaded', () => {
       });
   }
 
-  setupSeatSelection();
+  function setupWelcomeScreen() {
+    const overlay = document.createElement('div');
+    overlay.id = 'welcome-overlay';
+    overlay.innerHTML = `
+      <div class="welcome-content">
+        <h1 class="welcome-title">Welcome</h1>
+        <p class="welcome-text">
+          You will experience a combined audiovisual content.
+        </p>
+        <p class="welcome-text">
+          The experiment contains two modes: <strong>Mode A</strong> (instant response) and <strong>Mode B</strong> (energy accumulation). Your experiment will start randomly from either A or B mode. The system will automatically switch between them. Please press the <strong>Spacebar</strong> when you feel the switch happening. The screen edge glow when you press.
+        </p>
+        <p class="welcome-text">
+          For the best experience, please use headphones.
+        </p>
+        <p class="welcome-text">
+          Thank you for participating in this experiment!
+        </p>
+        <button class="welcome-button">Enter</button>
+      </div>
+    `;
+    document.body.appendChild(overlay);
+
+    const button = overlay.querySelector('.welcome-button');
+    button.addEventListener('click', () => {
+      overlay.classList.add('hidden');
+      // 等待淡出动画结束后再移除元素
+      setTimeout(() => {
+        if (overlay.parentNode) {
+          overlay.parentNode.removeChild(overlay);
+        }
+      }, 500);
+      setupSeatSelection();
+    });
+  }
+
+  setupWelcomeScreen();
 
 }); // end DOMContentLoaded

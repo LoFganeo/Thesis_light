@@ -20,6 +20,69 @@ let colorHueOffset = 0;
 let showRing = true;
 let showUI = true;
 
+const VALIDATION_THRESHOLDS = {
+  minPlaybackSeconds: 30,
+  minKeypressCount: 5,
+  minHitCount: 2,
+  reminderPlaybackSeconds: 20
+};
+
+const sessionStats = {
+  playbackSeconds: 0,
+  keypressCount: 0,
+  hitCount: 0,
+  negativeHitCount: 0
+};
+
+function resetSessionStats() {
+  sessionStats.playbackSeconds = 0;
+  sessionStats.keypressCount = 0;
+  sessionStats.hitCount = 0;
+  sessionStats.negativeHitCount = 0;
+}
+
+function updatePlaybackStats() {
+  if (window.audio && !isNaN(window.audio.currentTime)) {
+    sessionStats.playbackSeconds = Math.max(sessionStats.playbackSeconds, window.audio.currentTime);
+  }
+}
+
+function recordKeypressMetrics(rt) {
+  sessionStats.keypressCount += 1;
+  if (typeof rt === 'number' && isFinite(rt)) {
+    if (rt >= 0 && rt <= 2.0) {
+      sessionStats.hitCount += 1;
+    } else if (rt < 0 && rt >= -2.0) {
+      sessionStats.negativeHitCount += 1;
+    }
+  }
+}
+
+function evaluateSessionStats(stats = sessionStats) {
+  const playbackSeconds = stats.playbackSeconds || 0;
+  const keypressCount = stats.keypressCount || 0;
+  const hitCount = stats.hitCount || 0;
+  const negativeHits = stats.negativeHitCount || 0;
+
+  const meetsPlayback = playbackSeconds >= VALIDATION_THRESHOLDS.minPlaybackSeconds;
+  const meetsKeypress = keypressCount >= VALIDATION_THRESHOLDS.minKeypressCount;
+  const meetsHits = hitCount >= VALIDATION_THRESHOLDS.minHitCount;
+
+  const zeroHitButPressed = keypressCount >= VALIDATION_THRESHOLDS.minKeypressCount && hitCount === 0;
+  const allNegativeHits = hitCount === 0 && negativeHits > 0;
+
+  const meetsAll = meetsPlayback && meetsKeypress && meetsHits && !zeroHitButPressed && !allNegativeHits;
+
+  return {
+    meetsAll,
+    meetsPlayback,
+    meetsKeypress,
+    meetsHits,
+    zeroHitButPressed,
+    allNegativeHits
+  };
+}
+
 // === Logging retry + telemetry ===
 const LOG_QUEUE_KEY = 'thesis-log-queue-v1';
 const SWITCH_QUEUE_KEY = 'thesis-switch-queue-v1';
@@ -29,6 +92,7 @@ const RETRY_BASE_DELAY_MS = 400;
 const transmitStats = { sentCount: 0, queuedCount: 0 };
 let sessionFinalized = false;
 let pendingFinalizeAction = 'complete';
+let lastFinalizeResult = null;
 
 function safeLoadQueue(key){
   try {
@@ -275,6 +339,7 @@ function windowResized() {
 
 function draw() {
   background(0, 40); // faster clear
+  updatePlaybackStats();
 
   // Hue ring triadic color mapping
   auroraColors = [];
@@ -1308,6 +1373,11 @@ window.addEventListener('DOMContentLoaded', () => {
 
   // Feedback slider overlay (1-15) and thanks screen
   function showFeedbackSlider(){
+    updatePlaybackStats();
+    const evaluationAtFeedback = evaluateSessionStats();
+    if (pendingFinalizeAction !== 'cancel') {
+      pendingFinalizeAction = evaluationAtFeedback.meetsAll ? 'complete' : 'cancel';
+    }
     const overlay = document.createElement('div');
     overlay.id = 'feedback-overlay';
     overlay.innerHTML = `
@@ -1366,10 +1436,14 @@ window.addEventListener('DOMContentLoaded', () => {
   function showThanks(){
     const overlay = document.createElement('div');
     overlay.id = 'thanks-overlay';
+    const released = lastFinalizeResult && lastFinalizeResult.status === 'released';
+    const message = released
+      ? 'This session did not meet the analysis criteria and was not recorded.'
+      : 'Your feedback has been saved.';
     overlay.innerHTML = `
       <div class="welcome-content">
         <h1 class="welcome-title">Thank you for participating!</h1>
-        <p class="welcome-text">Your feedback has been saved.</p>
+        <p class="welcome-text">${message}</p>
         <div style="margin-top:18px;display:flex;gap:10px;align-items:center;justify-content:center;font-size:14px;opacity:.9">
           <span>Do you want to start again?</span>
           <button class="btn" id="thanks-restart">Yes</button>
@@ -1381,6 +1455,7 @@ window.addEventListener('DOMContentLoaded', () => {
     if (restartBtn){
       restartBtn.onclick = ()=>{
         try{ if (overlay.parentNode) overlay.parentNode.removeChild(overlay); }catch(e){}
+        lastFinalizeResult = null;
         setupSeatSelection();
       };
     }
@@ -1420,7 +1495,34 @@ window.addEventListener('DOMContentLoaded', () => {
     document.body.appendChild(overlay);
     overlay.querySelector('#fin-no').onclick = ()=>{ overlay.style.opacity='0'; setTimeout(()=>{ if (overlay.parentNode) overlay.parentNode.removeChild(overlay); window._finishingDialogOpen=false; }, 200); };
     overlay.querySelector('#fin-yes').onclick = async ()=>{
-      pendingFinalizeAction = 'cancel';
+      updatePlaybackStats();
+      const evaluation = evaluateSessionStats();
+      let proceedToFeedback = true;
+
+      if (!evaluation.meetsAll && sessionStats.playbackSeconds >= VALIDATION_THRESHOLDS.reminderPlaybackSeconds) {
+        const message = 'Data has not yet met the analysis criteria. Continue for another 10–20 seconds to include this session in the study?';
+        const continuePlayback = window.confirm(message);
+        if (continuePlayback) {
+          overlay.style.opacity='0';
+          setTimeout(()=>{
+            if (overlay.parentNode) overlay.parentNode.removeChild(overlay);
+            window._finishingDialogOpen=false;
+            try{
+              if (audio && audio.paused) {
+                audio.play();
+                setPlayIcon();
+              }
+            }catch(e){}
+          }, 200);
+          proceedToFeedback = false;
+        }
+      }
+
+      if (!proceedToFeedback) {
+        return;
+      }
+
+      pendingFinalizeAction = evaluation.meetsAll ? 'complete' : 'cancel';
       try{ if (audio && !audio.paused) audio.pause(); }catch(e){}
       overlay.style.opacity='0';
       setTimeout(()=>{ if (overlay.parentNode) overlay.parentNode.removeChild(overlay); window._finishingDialogOpen=false; showFeedbackSlider(); }, 200);
@@ -1438,10 +1540,16 @@ window.addEventListener('DOMContentLoaded', () => {
       return;
     }
 
+    updatePlaybackStats();
+    const audioTimeNow = window.audio.currentTime;
+    const lastSwitch = (typeof lastSwitchTime === 'number' && isFinite(lastSwitchTime)) ? lastSwitchTime : null;
+    const dt = lastSwitch !== null ? audioTimeNow - lastSwitch : null;
+    recordKeypressMetrics(dt);
+
     const logData = {
       participantId: participantId,
       sessionId: sessionId,
-      audioTime: window.audio.currentTime,
+      audioTime: audioTimeNow,
       currentMode: mappingMode,
       lastSwitchTime: lastSwitchTime
     };
@@ -1455,19 +1563,18 @@ window.addEventListener('DOMContentLoaded', () => {
         console.log('Log saved:', logData);
         logCount++;
         try{
-          const nowT = window.audio?.currentTime ?? 0;
-          const lastT = lastSwitchTime ?? 0;
-          const dt = nowT - lastT;
-          const isHit = dt >= 0 && dt <= hitWindowSec;
-          const isGood = dt >= 0 && dt <= goodWindowSec;
-          if (isGood) {
-            goodStreak++;
-          } else {
-            goodStreak = 0;
+          if (typeof dt === 'number' && isFinite(dt)) {
+            const isHit = dt >= 0 && dt <= hitWindowSec;
+            const isGood = dt >= 0 && dt <= goodWindowSec;
+            if (isGood) {
+              goodStreak++;
+            } else {
+              goodStreak = 0;
+            }
+            recentHits.push(isHit);
+            if (recentHits.length > RECENT_N) recentHits.shift();
+            recomputeDifficulty();
           }
-          recentHits.push(isHit);
-          if (recentHits.length > RECENT_N) recentHits.shift();
-          recomputeDifficulty();
         }catch(e){}
       })
       .catch(error => {
@@ -1545,6 +1652,8 @@ window.addEventListener('DOMContentLoaded', () => {
       featureUsage.hadCountdown = featureConfig.enableCountdown;
       logCount = 0;
       pendingFinalizeAction = 'complete';
+      resetSessionStats();
+      lastFinalizeResult = null;
       return { note: payload.note || null };
     } catch (error) {
       console.error('Error starting new session:', error);
@@ -1568,23 +1677,56 @@ window.addEventListener('DOMContentLoaded', () => {
     const remainingFeedback = safeLoadQueue(FEEDBACK_QUEUE_KEY).length;
     const droppedCount = remainingLogs + remainingSwitch + remainingFeedback;
 
+    updatePlaybackStats();
+    const statsSnapshot = {
+      playbackSeconds: Number(sessionStats.playbackSeconds.toFixed(2)),
+      keypressCount: sessionStats.keypressCount,
+      hitCount: sessionStats.hitCount,
+      negativeHitCount: sessionStats.negativeHitCount
+    };
+
     const payload = {
       action,
       sessionId,
       sentCount: transmitStats.sentCount,
       droppedCount,
-      hadCountdown: !!featureUsage.hadCountdown
+      hadCountdown: !!featureUsage.hadCountdown,
+      stats: statsSnapshot
+    };
+
+    const finalizeRequest = async (attempt = 1) => {
+      try {
+        const res = await fetch('/api/finish-session', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify(payload)
+        });
+        if (!res.ok) {
+          if (attempt >= RETRY_MAX_ATTEMPTS) {
+            const text = await res.text();
+            throw new Error(`finish-session failed: ${res.status} ${text}`);
+          }
+          await delay(RETRY_BASE_DELAY_MS * Math.pow(2, attempt - 1));
+          return finalizeRequest(attempt + 1);
+        }
+        return res.json();
+      } catch (error) {
+        if (attempt >= RETRY_MAX_ATTEMPTS) throw error;
+        await delay(RETRY_BASE_DELAY_MS * Math.pow(2, attempt - 1));
+        return finalizeRequest(attempt + 1);
+      }
     };
 
     try {
-      const ok = await sendWithRetry('/api/finish-session', payload);
-      if (!ok) {
-        console.warn('finish-session did not confirm');
-        sessionFinalized = false;
-        return;
+      const result = await finalizeRequest();
+      lastFinalizeResult = result;
+      if (result && result.status === 'released') {
+        alert('Session did not meet the analysis criteria. This attempt was not recorded.');
       }
       sessionId = null;
       participantId = null;
+      resetSessionStats();
+      sessionFinalized = false;
     } catch (error) {
       console.error('Failed to finalize session', error);
       sessionFinalized = false;

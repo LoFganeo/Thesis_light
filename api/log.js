@@ -9,10 +9,10 @@ module.exports = async (request, response) => {
     const { participantId, sessionId, audioTime, currentMode, lastSwitchTime } = request.body || {};
 
     if (!participantId) {
-      return response.status(400).json({ ok: false, error: 'participantId is required' });
+      return response.status(400).json({ error: 'participantId is required' });
     }
     if (!sessionId) {
-      return response.status(400).json({ ok: false, error: 'sessionId is required' });
+      return response.status(400).json({ error: 'sessionId is required' });
     }
 
     const client = await db.connect();
@@ -52,11 +52,25 @@ module.exports = async (request, response) => {
       VALUES (${participantId}, ${sid}, ${at}, ${currentMode || null}, ${lst}, ${delta});
     `;
 
+    const isHit = typeof delta === 'number' && delta >= 0 && delta <= 2.0;
+    const isNegative = typeof delta === 'number' && delta < 0 && delta >= -2.0;
+    const playback = typeof at === 'number' && isFinite(at) ? at : 0;
+
+    await client.sql`
+      UPDATE thesis_sessions
+      SET keypress_count     = keypress_count + 1,
+          hit_count          = hit_count + ${isHit ? 1 : 0},
+          negative_hit_count = negative_hit_count + ${isNegative ? 1 : 0},
+          playback_seconds   = GREATEST(playback_seconds, ${playback}),
+          last_event_at      = NOW()
+      WHERE session_id = ${sid} AND status = 'pending';
+    `;
+
     console.log(`[api/log] Saved log for session ${sid}`);
-    response.status(200).json({ ok: true });
+    response.status(200).json({ message: 'Log saved successfully' });
 
   } catch (error) {
     console.error('[api/log] Error saving log:', error);
-    response.status(500).json({ ok: false, error: error.message });
+    response.status(500).json({ error: error.message });
   }
 };

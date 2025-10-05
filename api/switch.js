@@ -49,6 +49,13 @@ module.exports = async (request, response) => {
       VALUES (${sid}, ${st}, ${difficulty || null}, ${mappingId || null}, ${deltaE === null ? null : Number(deltaE)}, ${entropy === null ? null : Number(entropy)}, ${distToBeat === null ? null : Number(distToBeat)});
     `;
 
+    await client.sql`
+      UPDATE thesis_sessions
+      SET playback_seconds = GREATEST(playback_seconds, ${st || 0}),
+          last_event_at    = NOW()
+      WHERE session_id = ${sid} AND status = 'pending';
+    `;
+
     return response.status(200).json({ ok: true });
   } catch (error) {
     console.error('[api/switch] Error:', error);

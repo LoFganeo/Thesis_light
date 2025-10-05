@@ -7,7 +7,25 @@ module.exports = async (request, response) => {
   }
   try {
     const client = await db.connect();
-    const { rows } = await client.sql`SELECT DISTINCT participant_id FROM thesis_sessions;`;
+
+    const expired = await client.sql`
+      DELETE FROM thesis_sessions
+      WHERE status = 'pending'
+        AND valid = FALSE
+        AND NOW() - last_event_at > INTERVAL '5 minutes'
+      RETURNING session_id;
+    `;
+
+    for (const row of expired.rows) {
+      await client.sql`DELETE FROM thesis_logs WHERE session_id = ${row.session_id};`;
+      await client.sql`DELETE FROM thesis_feedback WHERE session_id = ${row.session_id};`;
+    }
+
+    const { rows } = await client.sql`
+      SELECT participant_id
+      FROM thesis_sessions
+      WHERE status IN ('pending', 'final')
+    `;
     const usedSeats = rows.map(r => r.participant_id);
     response.status(200).json({ seats: usedSeats, degraded: false });
   } catch (error) {

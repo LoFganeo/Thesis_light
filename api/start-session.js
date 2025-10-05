@@ -27,7 +27,14 @@ module.exports = async (request, response) => {
         session_id TEXT PRIMARY KEY,
         participant_id TEXT NOT NULL,
         song_id TEXT NOT NULL,
-        created_at TIMESTAMPTZ DEFAULT NOW()
+        created_at TIMESTAMPTZ DEFAULT NOW(),
+        status TEXT NOT NULL DEFAULT 'pending',
+        last_event_at TIMESTAMPTZ DEFAULT NOW(),
+        playback_seconds DOUBLE PRECISION DEFAULT 0,
+        keypress_count INTEGER DEFAULT 0,
+        hit_count INTEGER DEFAULT 0,
+        negative_hit_count INTEGER DEFAULT 0,
+        valid BOOLEAN DEFAULT FALSE
       );
     `;
     await client.sql`ALTER TABLE thesis_sessions ALTER COLUMN session_id TYPE TEXT USING session_id::TEXT;`.catch(() => {});
@@ -37,8 +44,32 @@ module.exports = async (request, response) => {
     const sessionId = randomUUID();
     await client.sql`BEGIN`;
     const insert = await client.sql`
-      INSERT INTO thesis_sessions (session_id, participant_id, song_id)
-      VALUES (${sessionId}, ${participantId}, ${songId})
+      INSERT INTO thesis_sessions (
+        session_id,
+        participant_id,
+        song_id,
+        status,
+        playback_seconds,
+        keypress_count,
+        hit_count,
+        negative_hit_count,
+        valid,
+        last_event_at,
+        created_at
+      )
+      VALUES (
+        ${sessionId},
+        ${participantId},
+        ${songId},
+        'pending',
+        0,
+        0,
+        0,
+        0,
+        FALSE,
+        NOW(),
+        NOW()
+      )
       ON CONFLICT (participant_id) DO NOTHING
       RETURNING session_id;
     `;

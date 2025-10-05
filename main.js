@@ -474,19 +474,24 @@ function draw() {
     // Dynamic perturbation + energy bias
     let cx0 = [width*0.25, width*0.75, width*0.5, width*0.25, width*0.75][i];
     let cy0 = [height*0.22, height*0.22, height*0.5, height*0.78, height*0.78][i];
-    let dx = Math.sin(t*0.13 + i*1.2)*width*0.018 + Math.cos(t*0.19 + i*0.7)*width*0.012;
-    let dy = Math.cos(t*0.11 + i*1.7)*height*0.016 + Math.sin(t*0.17 + i*0.9)*height*0.011;
+    let dx = Math.sin(t*0.13 + i*1.2)*width*0.026 + Math.cos(t*0.21 + i*0.7)*width*0.017;
+    let dy = Math.cos(t*0.11 + i*1.7)*height*0.024 + Math.sin(t*0.19 + i*0.9)*height*0.016;
     // Energy bias (under high energy shift slightly toward center)
     let bandE = bands ? bands[i] : 0.1;
-    let centerBiasX = (width/2 - cx0) * bandE * 0.13;
-    let centerBiasY = (height/2 - cy0) * bandE * 0.13;
+    let centerBiasX = (width/2 - cx0) * bandE * 0.11;
+    let centerBiasY = (height/2 - cy0) * bandE * 0.11;
     let cx = cx0 + dx + centerBiasX;
     let cy = cy0 + dy + centerBiasY;
     // Smooth transition
     let prev = window._bandCenters[i];
-    let smooth = 0.82;
+    let smooth = 0.78;
     let newCx = prev[0]*smooth + cx*(1-smooth);
     let newCy = prev[1]*smooth + cy*(1-smooth);
+    const clamp = (v,min,max)=> Math.max(min, Math.min(max, v));
+    const regionXR = [width*0.12, width*0.12, width*0.15, width*0.12, width*0.12];
+    const regionYR = [height*0.12, height*0.12, height*0.16, height*0.12, height*0.12];
+    newCx = clamp(newCx, cx0 - regionXR[i], cx0 + regionXR[i]);
+    newCy = clamp(newCy, cy0 - regionYR[i], cy0 + regionYR[i]);
     bandCenters.push([newCx, newCy]);
     window._bandCenters[i] = [newCx, newCy];
     // Sigma dynamics: base + energy + perturbation + per-band variation

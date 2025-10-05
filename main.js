@@ -1,11 +1,12 @@
-// === Mapping模式切换 ===
-let mappingMode = 'A'; // 'A' = 瞬时响应, 'B' = 累积慢淡出
+// === Mapping Mode Switch ===
+let mappingMode = 'A'; // 'A' = instant response, 'B' = accumulated slow fade
 let bandAccum = [0,0,0,0,0];
-const decayRate = 0.92; // B模式下能量衰减系数
-// === 全局能量-音频同步偏移 ===
+const decayRate = 0.92; // energy decay factor in mode B
+// === Global energy–audio sync offset ===
 let offsetMs = 0;
-let participantId = null; // 将由座位选择器设置
-let lastSwitchTime = 0;   // 将在模式切换时更新
+let participantId = null; // set by seat selector
+let sessionId = null; // set by start-session API
+let lastSwitchTime = 0;   // updated on mode switch
 
 // Marker pulse overlay (Space key visual feedback)
 let markerPulse = null; // { start: millis(), duration: 900 }
@@ -15,11 +16,121 @@ let auroraColors = [];
 let colorsInitialized = false;
 let globalEnergy = 0, focusEnergy = 0, focusX = 0, focusY = 0;
 let colorHueOffset = 0;
-// 新增：UI与叠加控制
+// Added: UI and overlay controls
 let showRing = true;
 let showUI = true;
 
-// === 颜色转换工具（全局）===
+// === Logging retry + telemetry ===
+const LOG_QUEUE_KEY = 'thesis-log-queue-v1';
+const SWITCH_QUEUE_KEY = 'thesis-switch-queue-v1';
+const FEEDBACK_QUEUE_KEY = 'thesis-feedback-queue-v1';
+const RETRY_MAX_ATTEMPTS = 3;
+const RETRY_BASE_DELAY_MS = 400;
+const transmitStats = { sentCount: 0, queuedCount: 0 };
+let sessionFinalized = false;
+let pendingFinalizeAction = 'complete';
+
+function safeLoadQueue(key){
+  try {
+    if (!window.localStorage) return [];
+    const raw = window.localStorage.getItem(key);
+    if (!raw) return [];
+    const parsed = JSON.parse(raw);
+    return Array.isArray(parsed) ? parsed : [];
+  } catch (err) {
+    console.warn('Failed to load queue', key, err);
+    return [];
+  }
+}
+
+function safeSaveQueue(key, queue){
+  try {
+    if (!window.localStorage) return;
+    window.localStorage.setItem(key, JSON.stringify(queue));
+  } catch (err) {
+    console.warn('Failed to persist queue', key, err);
+  }
+}
+
+function enqueuePayload(queueKey, payload){
+  const queue = safeLoadQueue(queueKey);
+  queue.push({ payload, timestamp: Date.now() });
+  if (queue.length > 1000) queue.shift();
+  safeSaveQueue(queueKey, queue);
+  transmitStats.queuedCount += 1;
+}
+
+function delay(ms){
+  return new Promise(resolve => setTimeout(resolve, ms));
+}
+
+async function sendWithRetry(endpoint, payload, attempt = 1){
+  try {
+    const res = await fetch(endpoint, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(payload)
+    });
+    if (!res.ok) {
+      throw new Error(`HTTP ${res.status}`);
+    }
+    return true;
+  } catch (error) {
+    if (attempt >= RETRY_MAX_ATTEMPTS) {
+      console.warn('sendWithRetry exhausted', endpoint, error);
+      return false;
+    }
+    const waitMs = RETRY_BASE_DELAY_MS * Math.pow(2, attempt - 1);
+    await delay(waitMs);
+    return sendWithRetry(endpoint, payload, attempt + 1);
+  }
+}
+
+async function postWithRetry(endpoint, payload, queueKey){
+  if (!navigator.onLine) {
+    enqueuePayload(queueKey, payload);
+    return false;
+  }
+  const success = await sendWithRetry(endpoint, payload);
+  if (success) {
+    transmitStats.sentCount += 1;
+    return true;
+  }
+  enqueuePayload(queueKey, payload);
+  return false;
+}
+
+async function flushQueue(queueKey, endpoint){
+  const queue = safeLoadQueue(queueKey);
+  if (!queue.length || !navigator.onLine) return;
+  const remaining = [];
+  for (const item of queue) {
+    const ok = await sendWithRetry(endpoint, item.payload);
+    if (ok) {
+      transmitStats.sentCount += 1;
+      transmitStats.queuedCount = Math.max(0, transmitStats.queuedCount - 1);
+    } else {
+      remaining.push(item);
+    }
+  }
+  safeSaveQueue(queueKey, remaining);
+}
+
+async function flushAllQueues(){
+  await flushQueue(LOG_QUEUE_KEY, '/api/log');
+  await flushQueue(SWITCH_QUEUE_KEY, '/api/switch');
+  await flushQueue(FEEDBACK_QUEUE_KEY, '/api/feedback');
+}
+
+const urlParams = new URLSearchParams(window.location.search);
+const featureConfig = {
+  enableCountdown: urlParams.get('countdown') !== '0'
+};
+const featureUsage = {
+  hadCountdown: featureConfig.enableCountdown
+};
+
+// === Color conversion utilities (global) ===
 function rgbToHsl(r, g, b) {
   r /= 255; g /= 255; b /= 255;
   let max = Math.max(r, g, b), min = Math.min(r, g, b);
@@ -58,20 +169,20 @@ function hslToRgb(h, s, l) {
   return [Math.round(r*255), Math.round(g*255), Math.round(b*255)];
 }
 
-// === CSV能量数据相关 ===
+// === CSV energy data ===
 let energyData = [];
 let energyFrame = 0;
 let energyLoaded = false;
 let energyCols = 0;
 let csvPlaying = false;
 let csvInterval = null;
-let csvFps = 60; // 约每秒60帧
+let csvFps = 60; // about 60 fps
 
-// 历史轨迹数组
-let bandHistory = [[],[],[],[],[]]; // 五分区能量历史
-const historyLength = 30; // 轨迹长度（帧数）
+// History traces
+let bandHistory = [[],[],[],[],[]]; // five-band energy history
+const historyLength = 30; // trace length (frames)
 
-// PapaParse加载csv
+// Load CSV via PapaParse
 function preload() {
   if (typeof Papa !== 'undefined') {
     Papa.parse('stems/stem_energy_timeseries.csv', {
@@ -95,6 +206,7 @@ function preload() {
             return;
           }
           energyFrame = 0;
+          try{ computeGlobalSaliency(); }catch(e){ console.warn('Saliency compute failed', e); }
         } catch (err) {
           console.warn('Failed processing CSV results:', err);
           energyLoaded = false;
@@ -110,10 +222,47 @@ function preload() {
   }
 }
 
+// ---- Global saliency (S_global) — only compute, not change visuals ----
+// Simple, robust metrics on 5 bands over whole CSV: Var, PeakRate, Contrast, Regularity
+function computeGlobalSaliency(){
+  if (!energyLoaded || !Array.isArray(energyData) || energyData.length === 0) return;
+  const n = energyData.length;
+  const bands = 5;
+  const series = Array.from({length: bands}, (_,i)=> energyData.map(row => Number(row[i]||0)));
+
+  function mean(arr){ return arr.reduce((a,b)=>a+b,0)/arr.length; }
+  function variance(arr){ const m=mean(arr); let s=0; for(const v of arr){ const d=v-m; s+=d*d; } return s/arr.length; }
+  function std(arr){ return Math.sqrt(Math.max(variance(arr), 1e-9)); }
+  function percentile(arr, p){ const a=[...arr].sort((x,y)=>x-y); const idx=Math.min(a.length-1, Math.max(0, Math.floor((p/100)*a.length))); return a[idx]; }
+  function peakRate(arr){ const m=mean(arr), s=std(arr); const thr=m+0.6*s; let peaks=0; for(let i=1;i<arr.length-1;i++){ if (arr[i]>thr && arr[i]>arr[i-1] && arr[i]>=arr[i+1]) peaks++; } return (peaks/(n/ csvFps)); }
+  function contrast(arr){ const p95=percentile(arr,95), p50=percentile(arr,50); return (p95 - p50)/Math.max(1e-6, p50); }
+  function regularity(arr){ // simple normalized autocorr peak in 0.5..3s lag
+    const minLag = Math.floor(0.5*csvFps), maxLag = Math.floor(3.0*csvFps);
+    const m = mean(arr), denom = arr.reduce((a,b)=>a+(b-m)*(b-m),0) || 1e-6;
+    let best=0;
+    for(let lag=minLag; lag<=maxLag; lag+=Math.floor(csvFps/6)){
+      let num=0; for(let i=lag;i<arr.length;i++){ num += (arr[i]-m)*(arr[i-lag]-m); }
+      best = Math.max(best, num/denom);
+    }
+    return best; // 0..1
+  }
+  function zscore(vs){ const m=mean(vs), s=Math.sqrt(variance(vs))||1e-6; return vs.map(v=>(v-m)/s); }
+
+  const Var = series.map(variance);
+  const Peak = series.map(peakRate);
+  const Contr = series.map(contrast);
+  const Regl = series.map(regularity);
+  const w = {var:0.35, peak:0.35, contr:0.20, regl:0.10};
+  const S = zscore(Var).map((_,i)=> w.var*zscore(Var)[i] + w.peak*zscore(Peak)[i] + w.contr*zscore(Contr)[i] + w.regl*zscore(Regl)[i]);
+  const pairs = S.map((s,i)=>({i,s})).sort((a,b)=>b.s-a.s);
+  window._saliency = {scores:S, ranking:pairs, main:pairs[0].i, weights:w};
+  console.log('[Saliency] global scores', S.map(v=>v.toFixed(3)), 'main=', pairs[0]);
+}
+
 function setup() {
   let cnv = createCanvas(window.innerWidth, window.innerHeight);
   cnv.parent('p5-holder');
-  // 存储canvas元素，便于将DOM坐标转换为画布坐标
+  // Store canvas element for DOM-to-canvas coordinate conversion
   window._p5CanvasEl = cnv.elt;
   background(0);
 }
@@ -125,38 +274,38 @@ function windowResized() {
 
 
 function draw() {
-  background(0, 40); // 更快清屏
+  background(0, 40); // faster clear
 
-  // 色环三角色彩映射
+  // Hue ring triadic color mapping
   auroraColors = [];
-  // 平滑动画：baseAngle缓慢追踪colorHueOffset
+  // Smooth animation: baseAngle eases toward colorHueOffset
   if (typeof window.baseAngle === 'undefined') window.baseAngle = colorHueOffset % 360;
-  let speed = 0.18; // 越大越快
+  let speed = 0.18; // larger = faster
   let diff = ((colorHueOffset % 360) - window.baseAngle + 360) % 360;
   if (diff > 180) diff -= 360;
   window.baseAngle += diff * speed;
   window.baseAngle = (window.baseAngle + 360) % 360;
   let baseAngle = window.baseAngle;
-  // 三角顶点：低频、中频、高频
+  // Triangle vertices: low, mid, high
   let triAngles = [baseAngle, (baseAngle+120)%360, (baseAngle+240)%360];
   let triColors = triAngles.map(a => hslToRgb(a/360, 0.85, 0.55));
-  // 中点：低-中、中-高
+  // Midpoints: low–mid and mid–high
   let midAngles = [
-    (triAngles[0]+60)%360, // 低-中
-    (triAngles[2]+60)%360  // 中-高
+    (triAngles[0]+60)%360, // low–mid
+    (triAngles[2]+60)%360  // mid–high
   ];
   let midColors = midAngles.map(a => hslToRgb(a/360, 0.85, 0.55));
-  // auroraColors: [高频顶点, 中-高中点, 中频顶点, 低频顶点, 低-中中点]
+  // auroraColors: [hi1 top, mid-high midpoint, mid top, low top, low-mid midpoint]
   auroraColors = [
-    triColors[2],    // hi1 (高频顶点)
-    midColors[1],    // hi2 (中-高中点)
-    triColors[1],    // mid (中频顶点)
-    triColors[0],    // kick (低频顶点)
-    midColors[0]     // bass (低-中中点)
+    triColors[2],    // hi1 (high)
+    midColors[1],    // hi2 (mid-high midpoint)
+    triColors[1],    // mid
+    triColors[0],    // kick (low)
+    midColors[0]     // bass (low-mid midpoint)
   ];
   colorsInitialized = true;
 
-  // === 用csv能量数据驱动 ===
+  // === Drive with CSV energy ===
   let bands = [0.09,0.09,0.09,0.09,0.09];
   if (energyLoaded && energyData.length > 0) {
     let frameIdx = 0;
@@ -170,17 +319,17 @@ function draw() {
     if (mappingMode === 'A') {
       for(let i=0;i<5;i++) bands[i] = row[i] || 0.09;
     } else if (mappingMode === 'B') {
-      // hi1/kick分区（0和4）更钝化+延迟+高阈值，其他分区正常
+      // hi1/kick bands (0 and 4) have stronger damping + delay + higher threshold; other bands normal
       const minBase = [0.16, 0.11, 0.11, 0.11, 0.16];
       const boostRateArr = [0.08, 0.16, 0.16, 0.16, 0.08];
       const decayArr = [0.97, 0.92, 0.92, 0.92, 0.97];
       const gammaArr = [0.82, 0.78, 0.78, 0.78, 0.82];
-      // 响应延迟：hi1/kick用前2帧均值
+      // Response delay: hi1/kick use the average of previous 2 frames
       if (!window.bandDelay) window.bandDelay = [[],[],[],[],[]];
       for(let i=0;i<5;i++) {
         let target = row[i] || minBase[i];
         if (i===0 || i===4) {
-          // hi1/kick延迟
+          // hi1/kick delay
           window.bandDelay[i].push(target);
           if (window.bandDelay[i].length>2) window.bandDelay[i].shift();
           target = window.bandDelay[i].reduce((a,b)=>a+b,0)/window.bandDelay[i].length;
@@ -190,26 +339,36 @@ function draw() {
         bands[i] = Math.max(Math.pow(bandAccum[i], gammaArr[i]), minBase[i]);
       }
     }
-    // 更新bandHistory
+    // Update bandHistory
     for (let i=0;i<5;i++) {
       bandHistory[i].push(bands[i]);
       if (bandHistory[i].length > historyLength) bandHistory[i].shift();
     }
   }
 
-  // === 动态聚焦点 ===
+  // Apply spatial mapping (no lighthouse): remap bands/colors by slotMap if defined
+  if (typeof window._slotMap !== 'undefined' && Array.isArray(window._slotMap) && window._slotMap.length===5) {
+    const sm = window._slotMap;
+    // remap colors for visualization
+    const mappedColors = [ auroraColors[sm[0]], auroraColors[sm[1]], auroraColors[sm[2]], auroraColors[sm[3]], auroraColors[sm[4]] ];
+    const mappedBands  = [ bands[sm[0]],  bands[sm[1]],  bands[sm[2]],  bands[sm[3]],  bands[sm[4]] ];
+    auroraColors = mappedColors;
+    bands = mappedBands;
+  }
+
+  // === Dynamic focus point ===
   let time = millis()/1000;
   focusX = width/2 + Math.sin(time*0.23)*width*0.18 + Math.cos(time*0.13)*width*0.09;
   focusY = height/2 + Math.cos(time*0.19)*height*0.16 + Math.sin(time*0.11)*height*0.07;
 
-  // === 五分区像素云雾状渲染 ===
+  // === Five-band pixelated fog rendering ===
   let grid = 8;
-  // === 动态/自适应分区结构 ===
-  // 1. bandCenters随时间缓慢扰动（动态分区中心）
-  // 2. bandSigma随能量动态调整（自适应分区宽度）
-  // 3. 每帧对bandCenters和bandSigma做平滑，避免突变
-  // 4. 每个分区的sigma可略有差异（非均匀）
-  // 5. 分区中心可受能量影响微调
+  // === Dynamic/adaptive band layout ===
+  // 1) bandCenters slowly perturb over time (dynamic centers)
+  // 2) bandSigma adapts with energy (adaptive width)
+  // 3) per-frame smoothing to avoid abrupt jumps
+  // 4) slight per-band sigma differences (non-uniform)
+  // 5) centers biased toward screen center under high energy
   if (!window._bandCenters) {
     window._bandCenters = [
       [width*0.25, height*0.22],
@@ -228,38 +387,38 @@ function draw() {
   let bandSigmaArr = [];
   let t = millis()/1000;
   for (let i=0; i<5; i++) {
-    // 动态扰动+能量微调
+    // Dynamic perturbation + energy bias
     let cx0 = [width*0.25, width*0.75, width*0.5, width*0.25, width*0.75][i];
     let cy0 = [height*0.22, height*0.22, height*0.5, height*0.78, height*0.78][i];
     let dx = Math.sin(t*0.13 + i*1.2)*width*0.018 + Math.cos(t*0.19 + i*0.7)*width*0.012;
     let dy = Math.cos(t*0.11 + i*1.7)*height*0.016 + Math.sin(t*0.17 + i*0.9)*height*0.011;
-    // 能量微调（高能量时中心略向画面中心偏移）
+    // Energy bias (under high energy shift slightly toward center)
     let bandE = bands ? bands[i] : 0.1;
     let centerBiasX = (width/2 - cx0) * bandE * 0.13;
     let centerBiasY = (height/2 - cy0) * bandE * 0.13;
     let cx = cx0 + dx + centerBiasX;
     let cy = cy0 + dy + centerBiasY;
-    // 平滑过渡
+    // Smooth transition
     let prev = window._bandCenters[i];
     let smooth = 0.82;
     let newCx = prev[0]*smooth + cx*(1-smooth);
     let newCy = prev[1]*smooth + cy*(1-smooth);
     bandCenters.push([newCx, newCy]);
     window._bandCenters[i] = [newCx, newCy];
-    // sigma动态调整：基础+能量影响+扰动+分区差异
+    // Sigma dynamics: base + energy + perturbation + per-band variation
     let sigmaBase = baseSigma * (0.98 + 0.07*Math.sin(t*0.21+i*0.8));
     let sigmaEnergy = 1.0 + bandE*0.22;
     let sigma = sigmaBase * sigmaEnergy * (0.97 + 0.06*Math.cos(t*0.17+i*1.3));
-    // hi1/kick略更窄
+    // hi1/kick slightly narrower
     if (i===0||i===4) sigma *= 0.93;
-    // 平滑
+    // Smoothing
     let prevSigma = window._bandSigmaArr[i];
     let sigmaSmooth = 0.82;
     let newSigma = prevSigma*sigmaSmooth + sigma*(1-sigmaSmooth);
     bandSigmaArr.push(newSigma);
     window._bandSigmaArr[i] = newSigma;
   }
-  // CPU 路径（仅保留 CPU 渲染）
+  // CPU path (keep CPU rendering only)
   for (let x=0; x<width; x+=grid) {
     for (let y=0; y<height; y+=grid) {
       let weights = [];
@@ -284,7 +443,7 @@ function draw() {
       let normSum = weights.reduce((a,b)=>a+b,0);
       for (let i=0; i<5; i++) weights[i] /= normSum;
 
-      // 分区能量与颜色混合
+      // Band energy & color mixing
       let w1 = weights[maxIdx], w2 = weights[secondIdx];
       let colorA = auroraColors[maxIdx];
       let colorB = auroraColors[secondIdx];
@@ -329,7 +488,20 @@ function draw() {
     }
   }
 
-  // 绘制色环和三角形（与 Hue 滑块居中对齐，显示在滑块正上方）
+  // Preview lights: show five softly glowing regions before playback so users can test Hue
+  if (window._previewLights) {
+    noStroke();
+    for (let i=0;i<5;i++){
+      const c = auroraColors[i] || [180,180,180];
+      fill(c[0], c[1], c[2], 140);
+      const cx = (window._bandCenters && window._bandCenters[i]) ? window._bandCenters[i][0] : (i%2? width*0.75: width*0.25);
+      const cy = (window._bandCenters && window._bandCenters[i]) ? window._bandCenters[i][1] : ([height*0.22,height*0.22,height*0.5,height*0.78,height*0.78][i]||height*0.5);
+      const d = Math.min(width, height) * 0.22;
+      ellipse(cx, cy, d, d);
+    }
+  }
+
+  // Draw hue ring and triangle (aligned above Hue slider)
   if (window._hueHovered) {
     const ringR = 60;
     let ringX = 32 + 240/2; // fallback
@@ -349,7 +521,7 @@ function draw() {
 
     push();
     translate(ringX, ringY);
-    // 色环
+    // Ring
     for(let i=0;i<360;i+=2){
       let c = hslToRgb(i/360,0.85,0.55);
       stroke(c[0],c[1],c[2]);
@@ -359,7 +531,7 @@ function draw() {
       let x2 = cos(angle)*ringR*0.85, y2 = sin(angle)*ringR*0.85;
       line(x1,y1,x2,y2);
     }
-    // 三角形
+    // Triangle
     let triR = ringR*0.7;
     let triPts = triAngles.map(a => [cos(radians(a))*triR, sin(radians(a))*triR]);
     noFill();
@@ -368,7 +540,7 @@ function draw() {
     beginShape();
     for(let i=0;i<3;i++) vertex(triPts[i][0], triPts[i][1]);
     endShape(CLOSE);
-    // 顶点圆点和标签（LMH）
+    // Vertex dots and labels (L/M/H)
     let labels = ['L','M','H'];
     for(let i=0;i<3;i++){
       fill(triColors[i][0],triColors[i][1],triColors[i][2]);
@@ -464,6 +636,9 @@ function draw() {
 
 
 window.addEventListener('DOMContentLoaded', () => {
+  flushAllQueues();
+  window.addEventListener('online', flushAllQueues);
+
   // Styles
   const style = document.createElement('style');
   style.id = 'ui-style';
@@ -514,7 +689,7 @@ window.addEventListener('DOMContentLoaded', () => {
   .seat-box.used{background:#e55073;color:rgba(255,255,255,0.5);cursor:not-allowed;opacity:0.5;}
 
   /* Welcome Screen */
-  #welcome-overlay {
+  #welcome-overlay, #song-overlay, #feedback-overlay, #thanks-overlay {
     position: fixed;
     top: 0;
     left: 0;
@@ -534,7 +709,7 @@ window.addEventListener('DOMContentLoaded', () => {
     opacity: 1;
     transition: opacity 0.5s ease-out;
   }
-  #welcome-overlay.hidden {
+  #welcome-overlay.hidden, #song-overlay.hidden, #feedback-overlay.hidden, #thanks-overlay.hidden {
     opacity: 0;
     pointer-events: none;
   }
@@ -582,6 +757,12 @@ window.addEventListener('DOMContentLoaded', () => {
     background-color: #f0f0f0;
     transform: scale(1.05);
   }
+  .song-grid { display: grid; grid-template-columns: repeat(3, minmax(160px, 1fr)); gap: 16px; margin-top: 18px; }
+  .song-card { background: rgba(255,255,255,0.06); border: 1px solid rgba(255,255,255,0.15); border-radius: 12px; padding: 14px; }
+  .song-title { font-weight: 600; margin-bottom: 8px; }
+  .song-actions { display:flex; gap:10px; justify-content:center; }
+  .btn.disabled{ opacity:0.4; pointer-events:none; }
+  input[type=range].scale { width: 80%; margin-top: 12px; }
 
   /* Guided Tour Bubbles - Unified Design */
   .tour-bubble-base {
@@ -653,6 +834,10 @@ window.addEventListener('DOMContentLoaded', () => {
     filter: drop-shadow(-1px 0 2px rgba(0,0,0,0.2));
   }
 
+  /* Neon step badge */
+  .neon-step{display:inline-block;margin-right:8px;padding:2px 8px;border-radius:10px;color:#eaffff;background:rgba(78,205,196,0.15);font-weight:700;letter-spacing:1px;
+    box-shadow:0 0 10px rgba(78,205,196,0.35), inset 0 0 6px rgba(78,205,196,0.2);}
+
   /* Countdown Overlay */
   #countdown-overlay {
     position: fixed;
@@ -685,6 +870,11 @@ window.addEventListener('DOMContentLoaded', () => {
     transform: scale(1);
     opacity: 1;
   }
+
+  /* Feedback slider styling */
+  .nicer-range { -webkit-appearance:none; appearance:none; width:80%; height:6px; background: linear-gradient(90deg,#4ecdc4,#8df1ea); border-radius: 4px; outline:none; }
+  .nicer-range::-webkit-slider-thumb { -webkit-appearance:none; width:22px; height:22px; background:#fff; border:3px solid #4ecdc4; border-radius:50%; box-shadow:0 2px 8px rgba(0,0,0,0.4); cursor:pointer; }
+  .nicer-range::-moz-range-thumb { width:22px; height:22px; background:#fff; border:3px solid #4ecdc4; border-radius:50%; box-shadow:0 2px 8px rgba(0,0,0,0.4); cursor:pointer; }
   `;
   document.head.appendChild(style);
 
@@ -749,19 +939,31 @@ window.addEventListener('DOMContentLoaded', () => {
     </div>
   `;
   document.body.appendChild(offsetPanel);
+  // Bind offset slider
+  const offsetSlider = document.getElementById('offset-slider');
+  const offsetValue = document.getElementById('offset-value');
+  if (offsetSlider && offsetValue) {
+    offsetSlider.value = String(offsetMs);
+    offsetValue.textContent = String(offsetMs);
+    offsetSlider.oninput = (e) => {
+      const v = parseInt(e.target.value, 10) || 0;
+      offsetMs = Math.max(-2000, Math.min(2000, v));
+      offsetValue.textContent = String(offsetMs);
+    };
+  }
 
   // New: Guided Tour Bubble
   const tourBubble = document.createElement('div');
   tourBubble.id = 'tour-bubble';
   tourBubble.className = 'tour-bubble-base';
-  tourBubble.innerHTML = 'Click here to start the experience';
+  tourBubble.innerHTML = '<span class="neon-step">Step 2</span>Click here to start the experience';
   document.body.appendChild(tourBubble);
 
   // New: Hue Guided Tour Bubble
   const hueBubble = document.createElement('div');
   hueBubble.id = 'hue-bubble';
   hueBubble.className = 'tour-bubble-base';
-  hueBubble.innerHTML = 'Try changing colors with this control';
+  hueBubble.innerHTML = '<span class="neon-step">Step 1</span>Assign color mapping as you wish through the color panel';
   document.body.appendChild(hueBubble);
 
   // New: Countdown Overlay
@@ -780,6 +982,8 @@ window.addEventListener('DOMContentLoaded', () => {
   const mappingABtn = document.getElementById('mapping-a-btn');
   const mappingBBtn = document.getElementById('mapping-b-btn');
   function setMapping(mode){
+    // de-dup: only act when mode actually changes
+    if (mode === mappingMode) { updateMappingUI(); return; }
     if (window.audio) {
       lastSwitchTime = window.audio.currentTime;
     }
@@ -800,6 +1004,57 @@ window.addEventListener('DOMContentLoaded', () => {
       }
     }
     updateMappingUI();
+
+    // P0: log system switch event (only observe; mappingId used to carry lighthouse info if available)
+    try{
+      const nowT = (window.audio && !isNaN(window.audio.currentTime)) ? window.audio.currentTime : 0;
+      // Hard-mode spatial rotate (no lighthouse): rotate occasionally with cooldown >=25s
+      if (typeof window._slotMap === 'undefined') window._slotMap = [0,1,2,3,4];
+      if (typeof window._lastSpatialSwitchT === 'undefined') window._lastSpatialSwitchT = -1e9;
+      if (typeof window._currentMappingLabel === 'undefined') window._currentMappingLabel = 'none';
+      if (difficulty === 'hard' && window.audio && !window.audio.paused) {
+        const cooldown = getAdaptiveCooldownSec();
+        if (nowT - window._lastSpatialSwitchT >= cooldown) {
+          const sm = window._slotMap.slice();
+          const method = (Math.random() < 0.7) ? 'rotate' : 'mirror';
+          const rot = (arr,k)=> arr.map((_,i)=> arr[(i - k + arr.length)%arr.length]);
+          if (method === 'rotate'){
+            const step = (Math.random()<0.5)?1:2; // rotate 1 or 2
+            window._slotMap = rot(sm, step);
+            window._currentMappingLabel = `r${step}`;
+          } else {
+            // mirror horizontally or vertically (positions: 0 TL,1 TR,2 C,3 BL,4 BR)
+            if (Math.random()<0.5){
+              // horizontal mirror: swap left<->right
+              window._slotMap = [ sm[1], sm[0], sm[2], sm[4], sm[3] ];
+              window._currentMappingLabel = 'mh';
+            } else {
+              // vertical mirror: swap top<->bottom
+              window._slotMap = [ sm[3], sm[4], sm[2], sm[0], sm[1] ];
+              window._currentMappingLabel = 'mv';
+            }
+          }
+          window._lastSpatialSwitchT = nowT;
+        }
+      }
+      if (!sessionId) return;
+      const mappingLabel = window._currentMappingLabel || 'none';
+      const deltaE = (typeof energyDeltaAtTimeSec==='function' && window.audio) ? energyDeltaAtTimeSec(nowT) : null;
+      const payload = {
+        sessionId: sessionId,
+        switchTime: nowT,
+        difficulty: (typeof difficulty !== 'undefined') ? difficulty : null,
+        mappingId: mappingLabel,
+        deltaE: deltaE
+      };
+      postWithRetry('/api/switch', payload, SWITCH_QUEUE_KEY)
+        .then(success => {
+          if (!success) {
+            console.warn('Switch log queued for retry');
+          }
+        })
+        .catch(err => console.error('Switch log failed:', err));
+    }catch(e){ console.warn('log switch failed', e); }
   }
   function updateMappingUI() {
     mappingABtn.classList.toggle('active', mappingMode==='A');
@@ -828,29 +1083,136 @@ window.addEventListener('DOMContentLoaded', () => {
   window.audio = null;
   // Auto A/B switch scheduler (runs only while playing)
   let modeSwitchTimer = null;
-  let MODE_SWITCH_MIN_MS = 3000;
-  let MODE_SWITCH_MAX_MS = 10000;
+  // --- Adaptive auto-switch config/state ---
+  // Base intervals (ms)
+  let DIFF_MIN_MS_NORMAL = 3000, DIFF_MAX_MS_NORMAL = 9000;   // normal: 3–9s
+  let DIFF_MIN_MS_HARD   = 2600, DIFF_MAX_MS_HARD   = 6000;   // hard:   2.6–6s
+  // Soft-start window
+  const SOFT_START_SEC = 30;                                   // first 30s
+  const SOFT_MIN_MS = 4000, SOFT_MAX_MS = 8000;                // 4–8s
+  let hitWindowSec = 2.0;     // <= this = hit (was 0.7)
+  let goodWindowSec = 1.5;    // <= this = very good (was 0.5)
+  let goodStreak = 0;         // consecutive very-good hits
+  let recentHits = [];        // last N boolean
+  const RECENT_N = 4;         // was 6
+  let difficulty = 'normal';  // 'normal' | 'hard'
+  const DIFF_UP_THRESHOLD = 0.75;
+  const DIFF_DOWN_THRESHOLD = 0.50;
+  const DIFF_MIN_HOLD_SEC = 5; // minimum time before changing difficulty
+  let lastDifficultyChangeT = 0;
+
+  function recomputeDifficulty(){
+    const hitRate = recentHits.length ? (recentHits.reduce((a,b)=>a+(b?1:0),0)/recentHits.length) : 0;
+    window._hitRate = hitRate; // expose for adaptive cooldown
+    const nowT = (window.audio && !isNaN(window.audio.currentTime)) ? window.audio.currentTime : (performance.now()/1000);
+    if (!Number.isFinite(lastDifficultyChangeT)) lastDifficultyChangeT = nowT;
+    const elapsed = nowT - lastDifficultyChangeT;
+    const canChange = elapsed >= DIFF_MIN_HOLD_SEC;
+    const wantsHard = (goodStreak >= 2) || (hitRate >= DIFF_UP_THRESHOLD);
+    const wantsNormal = hitRate <= DIFF_DOWN_THRESHOLD;
+    let next = difficulty;
+    if (canChange) {
+      if (difficulty !== 'hard' && wantsHard) {
+        next = 'hard';
+      } else if (difficulty !== 'normal' && wantsNormal) {
+        next = 'normal';
+      }
+    }
+    if (next !== difficulty) {
+      difficulty = next;
+      lastDifficultyChangeT = nowT;
+      console.debug('[Difficulty] change', { difficulty, hitRate, goodStreak, elapsed });
+    }
+  }
+
+  // Adaptive cooldown: 10–20s sliding by last 4 hits + ±10% jitter
+  function getAdaptiveCooldownSec(){
+    const hr = (typeof window._hitRate === 'number') ? window._hitRate : 0.5;
+    let minB=13, maxB=17; // default middle band
+    if (hr >= 0.75){ minB=10; maxB=13; }
+    else if (hr <= 0.25){ minB=17; maxB=20; }
+    let base = minB + Math.random()*(maxB-minB);
+    const jitter = 1 + (Math.random()*0.2 - 0.1); // ±10%
+    const v = Math.min(20, Math.max(10, base*jitter));
+    return v;
+  }
+
+  const MIN_AUTO_DELAY_MS = 2500;
+
+  function pickDelayMsWithDifficulty(){
+    // Soft-start: first 30s slower regardless of difficulty
+    const nowT = (window.audio && !isNaN(window.audio.currentTime)) ? window.audio.currentTime : 0;
+    let minMs, maxMs;
+    if (nowT < SOFT_START_SEC){
+      minMs = SOFT_MIN_MS; maxMs = SOFT_MAX_MS;
+    } else if (difficulty === 'hard'){
+      minMs = DIFF_MIN_MS_HARD; maxMs = DIFF_MAX_MS_HARD;
+    } else {
+      minMs = DIFF_MIN_MS_NORMAL; maxMs = DIFF_MAX_MS_NORMAL;
+    }
+    const base = minMs + Math.random()*Math.max(0, maxMs-minMs);
+    const jitter = 1 + (Math.random()*0.2 - 0.1); // ±10%
+    return Math.max(MIN_AUTO_DELAY_MS, base * jitter);
+  }
+
+  function energyDeltaAtTimeSec(tSec){
+    if (!energyLoaded || !energyData.length) return Infinity;
+    const idx = Math.max(1, Math.min(energyData.length-1, Math.floor(tSec*csvFps)));
+    const row = energyData[idx] || [];
+    const prev = energyData[idx-1] || [];
+    let d = 0;
+    for(let i=0;i<5;i++){ const a=row[i]||0, b=prev[i]||0; d += Math.abs(a-b); }
+    return d;
+  }
+
   function scheduleNextModeSwitch(){
-    const span = MODE_SWITCH_MAX_MS - MODE_SWITCH_MIN_MS;
-    const delay = MODE_SWITCH_MIN_MS + Math.random() * (span >= 0 ? span : 0);
-    console.debug('[AutoSwitch] scheduling next in', Math.round(delay), 'ms');
+    if (!audio || audio.paused) {
+      console.debug('[AutoSwitch] paused, skip scheduling');
+      return;
+    }
+    const delayBase = pickDelayMsWithDifficulty();
+    let delay = delayBase;
+    // On hard mode, prefer a future moment with lower energy change within the window
+    try{
+      if (difficulty === 'hard' && audio && isFinite(audio.duration) && !audio.paused){
+        const nowT = audio.currentTime;
+        const minS = delayBase/1000 - 0.4; // allow slight earlier/later around base
+        const maxS = delayBase/1000 + 0.6;
+        let bestOffset = delayBase/1000;
+        let bestScore = Infinity;
+        for (let s = minS; s <= maxS; s += 0.2){
+          const t = nowT + Math.max(0.6, s); // ensure >=0.6s in future
+          const sc = energyDeltaAtTimeSec(t);
+          if (sc < bestScore){ bestScore = sc; bestOffset = s; }
+        }
+        delay = Math.max(MIN_AUTO_DELAY_MS, Math.round(bestOffset*1000));
+      }
+    }catch(e){}
+
+    console.debug('[AutoSwitch]', {difficulty, delay});
     modeSwitchTimer = setTimeout(()=>{
-      // clear the handle so a future start can re-arm even if we don't reschedule here
       modeSwitchTimer = null;
       try{
         if (audio && !audio.paused) {
-          const next = Math.random() < 0.5 ? 'A' : 'B';
-          console.debug('[AutoSwitch] switching to', next);
+          // Always toggle to ensure a real switch (avoid logging no-op)
+          const next = (mappingMode === 'A') ? 'B' : 'A';
           setMapping(next);
-        } else {
-          console.debug('[AutoSwitch] audio not playing, skip switch');
         }
       } finally {
         if (audio && !audio.paused) scheduleNextModeSwitch();
       }
     }, delay);
   }
-  function startModeAutoSwitch(){ if (!modeSwitchTimer){ console.debug('[AutoSwitch] start'); scheduleNextModeSwitch(); } }
+  function startModeAutoSwitch(){
+    if (!modeSwitchTimer){
+      console.debug('[AutoSwitch] start');
+      goodStreak = 0;
+      recentHits.length = 0;
+      difficulty = 'normal';
+      lastDifficultyChangeT = (window.audio && !isNaN(window.audio.currentTime)) ? window.audio.currentTime : (performance.now()/1000);
+      scheduleNextModeSwitch();
+    }
+  }
   function stopModeAutoSwitch(){ if (modeSwitchTimer){ console.debug('[AutoSwitch] stop'); clearTimeout(modeSwitchTimer); modeSwitchTimer = null; } }
 
   function playCSV(){ if (!csvPlaying){ csvPlaying = true; csvInterval = setInterval(()=>{ if (energyLoaded && csvPlaying){ energyFrame = (energyFrame + 1) % energyData.length; } }, 1000/csvFps); } }
@@ -868,35 +1230,44 @@ window.addEventListener('DOMContentLoaded', () => {
     }
 
     if (audio.paused){
-      // --- Countdown Logic ---
-      const countdownNumber = document.getElementById('countdown-number');
-      countdownOverlay.classList.add('visible');
-      let count = 3;
+      if (featureConfig.enableCountdown) {
+        featureUsage.hadCountdown = true;
+        const countdownNumber = document.getElementById('countdown-number');
+        countdownOverlay.classList.add('visible');
+        let count = 3;
 
-      const showNumber = (num) => {
-        countdownNumber.textContent = num;
-        countdownNumber.classList.add('show');
-        setTimeout(() => {
-          countdownNumber.classList.remove('show');
-        }, 650); // Number stays visible for 650ms
-      };
+        const showNumber = (num) => {
+          countdownNumber.textContent = num;
+          countdownNumber.classList.add('show');
+          setTimeout(() => {
+            countdownNumber.classList.remove('show');
+          }, 650);
+        };
 
-      const countdownInterval = setInterval(() => {
-        if (count > 0) {
-          showNumber(count);
-          count--;
-        } else {
-          clearInterval(countdownInterval);
-          countdownOverlay.classList.remove('visible');
-          // Start actual playback after countdown
-          audio.play();
-          setPlayIcon();
-        }
-      }, 1000); // Tick every second
-
+        const countdownInterval = setInterval(() => {
+          if (count > 0) {
+            showNumber(count);
+            count--;
+          } else {
+            clearInterval(countdownInterval);
+            countdownOverlay.classList.remove('visible');
+            audio.play();
+            window._previewLights = false;
+            setPlayIcon();
+          }
+        }, 1000);
+      } else {
+        audio.play();
+        window._previewLights = false;
+        setPlayIcon();
+      }
     } else {
       audio.pause();
       setPlayIcon();
+      // If paused before end, confirm finish
+      if (audio.currentTime > 0 && audio.currentTime < (isFinite(audio.duration)? audio.duration-0.2 : 1e9)) {
+        confirmFinishDialog();
+      }
     }
   }
   if (sampleSelect){
@@ -908,8 +1279,15 @@ window.addEventListener('DOMContentLoaded', () => {
       audioLoaded = false;
       audio.oncanplay = () => { audioLoaded = true; setPlayIcon(); };
       audio.onplay = () => { pauseCSV(); startModeAutoSwitch(); };
-      audio.onpause = () => { pauseCSV(); stopModeAutoSwitch(); };
-      audio.onended = () => { pauseCSV(); stopModeAutoSwitch(); setPlayIcon(); };
+      audio.onpause = () => {
+        pauseCSV(); stopModeAutoSwitch();
+        try{
+          if (audio && isFinite(audio.duration) && audio.currentTime > 0 && audio.currentTime < audio.duration - 0.2) {
+            if (!window._finishingDialogOpen) confirmFinishDialog();
+          }
+        }catch(e){}
+      };
+      audio.onended = () => { pauseCSV(); stopModeAutoSwitch(); setPlayIcon(); try{ showFeedbackSlider(); }catch(e){} };
       energyFrame = 0;
       setPlayIcon();
     };
@@ -928,41 +1306,173 @@ window.addEventListener('DOMContentLoaded', () => {
   hueSlider.oninput = (e)=>{ colorHueOffset = parseInt(e.target.value); };
   hueRandBtn.onclick = ()=>{ colorHueOffset = (colorHueOffset + Math.floor(Math.random()*90+10)) % 360; hueSlider.value = colorHueOffset; };
 
+  // Feedback slider overlay (1-15) and thanks screen
+  function showFeedbackSlider(){
+    const overlay = document.createElement('div');
+    overlay.id = 'feedback-overlay';
+    overlay.innerHTML = `
+      <div class="welcome-content">
+        <h1 class="welcome-title">Feedback</h1>
+        <p class="welcome-text">How many times do you think the mode switched?</p>
+        <input type="range" min="1" max="30" step="1" value="8" id="fb-count" class="nicer-range" />
+        <div id="fb-count-wrap" style="display:none;margin-top:10px;font-size:24px;font-weight:700;letter-spacing:1px"><span id="fb-count-val"></span></div>
+        <div style="margin-top:18px"></div>
+        <p class="welcome-text">How difficult was it?</p>
+        <input type="range" min="1" max="5" step="1" value="3" id="fb-diff" class="nicer-range" />
+        <div id="fb-diff-wrap" style="display:none;margin-top:10px;font-size:20px;font-weight:700;letter-spacing:1px">Difficulty: <span id="fb-diff-val"></span></div>
+        <div style="margin-top:16px;display:flex;justify-content:center">
+          <button class="welcome-button" id="fb-submit">Submit</button>
+        </div>
+      </div>`;
+    document.body.appendChild(overlay);
+    const slider = overlay.querySelector('#fb-count');
+    const out = overlay.querySelector('#fb-count-val');
+    const outWrap = overlay.querySelector('#fb-count-wrap');
+    const diffSlider = overlay.querySelector('#fb-diff');
+    const diffOut = overlay.querySelector('#fb-diff-val');
+    const diffWrap = overlay.querySelector('#fb-diff-wrap');
+    const btn = overlay.querySelector('#fb-submit');
+    // Show values only when the user interacts
+    slider.oninput = ()=>{ out.textContent = slider.value; outWrap.style.display='block'; };
+    diffSlider.oninput = ()=>{ diffOut.textContent = diffSlider.value; diffWrap.style.display='block'; };
+    btn.onclick = async ()=>{
+      if (!sessionId) {
+        alert('Session is not ready. Please wait a moment and try again.');
+        return;
+      }
+      const payload = {
+        participantId: (typeof participantId === 'string') ? participantId : null,
+        sessionId: sessionId,
+        timesGuessed: parseInt(slider.value,10),
+        difficultyRating: parseInt(diffSlider.value,10)
+      };
+      try {
+        const success = await postWithRetry('/api/feedback', payload, FEEDBACK_QUEUE_KEY);
+        if (!success) {
+          console.warn('Feedback queued for retry');
+        }
+      } catch (e) {
+        console.error('Failed to submit feedback:', e);
+      }
+      const action = pendingFinalizeAction;
+      await finalizeSession(action);
+      pendingFinalizeAction = 'complete';
+      overlay.classList.add('hidden');
+      setTimeout(()=>{ if (overlay.parentNode) overlay.parentNode.removeChild(overlay); showThanks(); }, 300);
+    };
+    
+  }
+
+  function showThanks(){
+    const overlay = document.createElement('div');
+    overlay.id = 'thanks-overlay';
+    overlay.innerHTML = `
+      <div class="welcome-content">
+        <h1 class="welcome-title">Thank you for participating!</h1>
+        <p class="welcome-text">Your feedback has been saved.</p>
+        <div style="margin-top:18px;display:flex;gap:10px;align-items:center;justify-content:center;font-size:14px;opacity:.9">
+          <span>Do you want to start again?</span>
+          <button class="btn" id="thanks-restart">Yes</button>
+        </div>
+      </div>`;
+    document.body.appendChild(overlay);
+    // Stay on Thank You screen; allow restart
+    const restartBtn = overlay.querySelector('#thanks-restart');
+    if (restartBtn){
+      restartBtn.onclick = ()=>{
+        try{ if (overlay.parentNode) overlay.parentNode.removeChild(overlay); }catch(e){}
+        setupSeatSelection();
+      };
+    }
+  }
+
+  // Finish confirmation when pausing mid-song
+  function confirmFinishDialog(){
+    const overlay = document.createElement('div');
+    overlay.id = 'finish-overlay';
+    window._finishingDialogOpen = true;
+    overlay.style.position = 'fixed';
+    overlay.style.inset = '0';
+    overlay.style.background = 'rgba(0,0,0,0.6)';
+    overlay.style.zIndex = '12000';
+    overlay.style.display = 'flex';
+    overlay.style.alignItems = 'center';
+    overlay.style.justifyContent = 'center';
+    overlay.innerHTML = `
+      <div class="welcome-content" style="
+        background: rgba(30,32,40,0.92);
+        backdrop-filter: saturate(1.1) blur(12px);
+        -webkit-backdrop-filter: saturate(1.1) blur(12px);
+        border: 1px solid rgba(78,205,196,0.30);
+        border-radius: 14px;
+        padding: 18px 22px;
+        max-width: 520px;
+        color: #fff;
+        box-shadow: 0 10px 28px rgba(0,0,0,0.35), 0 0 22px rgba(78,205,196,0.18);
+      ">
+        <h2 style="margin:0 0 8px 0; color:#eafaf8; text-shadow:0 0 8px rgba(78,205,196,0.35)">Do you wish to finish?</h2>
+        <p style="margin:6px 0 0 0; opacity:.85">You can submit feedback now or continue listening.</p>
+        <div style="display:flex; gap:12px; justify-content:center; margin-top:12px">
+          <button class="btn" id="fin-no">No</button>
+          <button class="btn primary" id="fin-yes">Yes</button>
+        </div>
+      </div>`;
+    document.body.appendChild(overlay);
+    overlay.querySelector('#fin-no').onclick = ()=>{ overlay.style.opacity='0'; setTimeout(()=>{ if (overlay.parentNode) overlay.parentNode.removeChild(overlay); window._finishingDialogOpen=false; }, 200); };
+    overlay.querySelector('#fin-yes').onclick = async ()=>{
+      pendingFinalizeAction = 'cancel';
+      try{ if (audio && !audio.paused) audio.pause(); }catch(e){}
+      overlay.style.opacity='0';
+      setTimeout(()=>{ if (overlay.parentNode) overlay.parentNode.removeChild(overlay); window._finishingDialogOpen=false; showFeedbackSlider(); }, 200);
+    };
+  }
+
+  let logCount = 0;
   function logAndTriggerPulse() {
     // Trigger visual pulse immediately
     markerPulse = { start: millis(), duration: 450 };
 
     // If no seat is selected or audio is not playing, do not log
-    if (!participantId || !window.audio || window.audio.paused) {
-      console.warn('Log attempt failed: No participant ID or audio not playing.');
+    if (!participantId || !sessionId || !window.audio || window.audio.paused) {
+      console.warn('Log attempt failed: No participant ID, session ID, or audio not playing.');
       return;
     }
 
     const logData = {
       participantId: participantId,
+      sessionId: sessionId,
       audioTime: window.audio.currentTime,
       currentMode: mappingMode,
       lastSwitchTime: lastSwitchTime
     };
 
-    // Send data to the server
-    fetch('/api/log', {
-      method: 'POST',
-      headers: {
-        'Content-Type': 'application/json',
-      },
-      body: JSON.stringify(logData),
-    })
-    .then(response => {
-      if (!response.ok) {
-        console.error('Failed to save log', response.statusText);
-      } else {
+    postWithRetry('/api/log', logData, LOG_QUEUE_KEY)
+      .then(success => {
+        if (!success) {
+          console.warn('Log queued for retry');
+          return;
+        }
         console.log('Log saved:', logData);
-      }
-    })
-    .catch(error => {
-      console.error('Error sending log:', error);
-    });
+        logCount++;
+        try{
+          const nowT = window.audio?.currentTime ?? 0;
+          const lastT = lastSwitchTime ?? 0;
+          const dt = nowT - lastT;
+          const isHit = dt >= 0 && dt <= hitWindowSec;
+          const isGood = dt >= 0 && dt <= goodWindowSec;
+          if (isGood) {
+            goodStreak++;
+          } else {
+            goodStreak = 0;
+          }
+          recentHits.push(isHit);
+          if (recentHits.length > RECENT_N) recentHits.shift();
+          recomputeDifficulty();
+        }catch(e){}
+      })
+      .catch(error => {
+        console.error('Error sending log:', error);
+      });
   }
 
   // Hold-to-show (Backquote) + shortcuts
@@ -1000,6 +1510,129 @@ window.addEventListener('DOMContentLoaded', () => {
     if (isBackquote) { backquoteHeld = false; hideHiddenPanels(); }
   });
 
+  async function startNewSession(pId) {
+    const songId = 'stem-full';
+
+    try {
+      const res = await fetch('/api/start-session', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ participantId: pId, songId })
+      });
+
+      let payload = {};
+      try {
+        payload = await res.json();
+      } catch (_) {
+        payload = {};
+      }
+
+      if (res.status === 409) {
+        const error = payload?.error || 'Seat already taken';
+        throw Object.assign(new Error(error), { code: 'seat-taken' });
+      }
+
+      if (!res.ok || !payload?.sessionId) {
+        const msg = payload?.error || `Failed to start session (status ${res.status})`;
+        throw Object.assign(new Error(msg), { code: 'session-failed' });
+      }
+
+      sessionId = String(payload.sessionId);
+      console.log(`Session started successfully. Session ID: ${sessionId}`);
+      sessionFinalized = false;
+      transmitStats.sentCount = 0;
+      transmitStats.queuedCount = 0;
+      featureUsage.hadCountdown = featureConfig.enableCountdown;
+      logCount = 0;
+      pendingFinalizeAction = 'complete';
+      return { note: payload.note || null };
+    } catch (error) {
+      console.error('Error starting new session:', error);
+      throw error;
+    }
+  }
+
+  async function finalizeSession(action = 'complete') {
+    if (!sessionId || sessionFinalized) {
+      return;
+    }
+    sessionFinalized = true;
+    try {
+      await flushAllQueues();
+    } catch (err) {
+      console.warn('Queue flush failed before finalize', err);
+    }
+
+    const remainingLogs = safeLoadQueue(LOG_QUEUE_KEY).length;
+    const remainingSwitch = safeLoadQueue(SWITCH_QUEUE_KEY).length;
+    const remainingFeedback = safeLoadQueue(FEEDBACK_QUEUE_KEY).length;
+    const droppedCount = remainingLogs + remainingSwitch + remainingFeedback;
+
+    const payload = {
+      action,
+      sessionId,
+      sentCount: transmitStats.sentCount,
+      droppedCount,
+      hadCountdown: !!featureUsage.hadCountdown
+    };
+
+    try {
+      const ok = await sendWithRetry('/api/finish-session', payload);
+      if (!ok) {
+        console.warn('finish-session did not confirm');
+        sessionFinalized = false;
+        return;
+      }
+      sessionId = null;
+      participantId = null;
+    } catch (error) {
+      console.error('Failed to finalize session', error);
+      sessionFinalized = false;
+    }
+  }
+
+  function renderSeatGrid(overlay, usedSeats) {
+    let gridHtml = '<h1>Select Your Seat</h1><p>Each seat corresponds to a unique participant ID.</p><div id="seat-grid">';
+    for (let i = 1; i <= 40; i++) {
+      const seatId = `S${i.toString().padStart(2, '0')}`;
+      const isUsed = usedSeats.includes(seatId);
+      gridHtml += `<div class="seat-box ${isUsed ? 'used' : 'available'}" data-seat-id="${seatId}">${seatId}</div>`;
+    }
+    gridHtml += '</div>';
+    overlay.innerHTML = gridHtml;
+
+    const availableSeats = overlay.querySelectorAll('.seat-box.available');
+    availableSeats.forEach(seat => {
+      seat.addEventListener('click', async () => {
+        if (seat.dataset.state === 'busy') return;
+        seat.dataset.state = 'busy';
+        participantId = seat.getAttribute('data-seat-id');
+        console.log(`Seat selected: ${participantId}`);
+
+        try {
+          await startNewSession(participantId);
+        } catch (error) {
+          participantId = null;
+          seat.dataset.state = 'idle';
+          alert('Failed to start session. Please try again.');
+          console.warn('Failed to start session from compact selector:', error);
+          return;
+        }
+
+        overlay.style.opacity = '0';
+        setTimeout(() => {
+          if (overlay.parentNode) {
+            overlay.parentNode.removeChild(overlay);
+          }
+           // Show tour bubble
+          const tourBubble = document.getElementById('tour-bubble');
+          if (tourBubble) tourBubble.classList.add('visible');
+        }, 300);
+      });
+    });
+  }
+
+  // Seat selection overlay (100 seats: seat-1 ... seat-100) with fetch + fallback
   function setupSeatSelection() {
     const overlay = document.createElement('div');
     overlay.id = 'seat-overlay';
@@ -1016,35 +1649,97 @@ window.addEventListener('DOMContentLoaded', () => {
         if (!res.ok) throw new Error(`API responded with ${res.status}`);
         return res.json();
       })
-      .then(usedSeats => {
+      .then((payload) => {
+        const used = Array.isArray(payload)
+          ? payload
+          : Array.isArray(payload?.seats)
+            ? payload.seats
+            : [];
+        const degraded = Array.isArray(payload) ? false : !!payload?.degraded;
+        if (degraded) {
+          const notice = document.createElement('p');
+          notice.style.color = '#f5b942';
+          notice.style.marginBottom = '18px';
+          notice.textContent = 'Seat locking is running in offline mode. Seats may collide.';
+          overlay.insertBefore(notice, grid);
+        }
         for (let i = 1; i <= 100; i++) {
           const seatId = `seat-${i}`;
           const seat = document.createElement('div');
           seat.className = 'seat-box';
           seat.textContent = i;
           seat.dataset.id = seatId;
-
-          if (usedSeats.includes(seatId)) {
+          if (used.includes(seatId)) {
             seat.classList.add('used');
           } else {
-            seat.classList.add('available');
-            seat.onclick = () => {
-              participantId = seatId;
+          seat.classList.add('available');
+          seat.onclick = async () => {
+            if (seat.dataset.state === 'busy' || seat.classList.contains('used')) return;
+            seat.dataset.state = 'busy';
+            participantId = seatId;
+            seat.classList.add('pending');
+            try {
+              await startNewSession(participantId);
               console.log(`Seat selected: ${participantId}`);
-              document.body.removeChild(overlay);
-              // Show both guided tour bubbles after seat selection
+
+              // Randomize initial spatial mapping for this session (r1/r2 or mirrors)
+              try {
+                if (typeof window._slotMap === 'undefined') window._slotMap = [0,1,2,3,4];
+                const sm = [0,1,2,3,4];
+                const method = (Math.random() < 0.8) ? 'rotate' : 'mirror';
+                const rot = (arr,k)=> arr.map((_,i)=> arr[(i - k + arr.length)%arr.length]);
+                if (method === 'rotate'){
+                  const step = Math.random() < 0.5 ? 1 : 2;
+                  window._slotMap = rot(sm, step);
+                  window._currentMappingLabel = `r${step}`;
+                } else {
+                  if (Math.random()<0.5){ window._slotMap = [ sm[1], sm[0], sm[2], sm[4], sm[3] ]; window._currentMappingLabel='mh'; }
+                  else { window._slotMap = [ sm[3], sm[4], sm[2], sm[0], sm[1] ]; window._currentMappingLabel='mv'; }
+                }
+                window._lastSpatialSwitchT = 0;
+                window._previewLights = true; // enable preview lights for Step 1 hue selection
+              } catch(e){ console.warn('init spatial mapping failed', e); }
+
+              overlay.style.opacity = '0';
               setTimeout(() => {
-                tourBubble.classList.add('visible');
-                hueBubble.classList.add('visible');
+                if (overlay.parentNode) overlay.parentNode.removeChild(overlay);
+                const tourBubbleEl = document.getElementById('tour-bubble');
+                if (tourBubbleEl) tourBubbleEl.classList.add('visible');
+                const hueB = document.getElementById('hue-bubble');
+                setTimeout(()=>{ if (hueB) hueB.classList.add('visible'); }, 1200);
               }, 300);
-            };
+            } catch (error) {
+              participantId = null;
+              if (error.code === 'seat-taken') {
+                seat.classList.remove('available');
+                seat.classList.add('used');
+                seat.setAttribute('title', 'Seat already taken');
+                alert('Seat already taken. Please choose another seat.');
+              } else {
+                alert('Failed to start session. Please try again.');
+                console.warn('Failed to start session:', error);
+              }
+            } finally {
+              seat.dataset.state = 'idle';
+              seat.classList.remove('pending');
+            }
+          };
           }
           grid.appendChild(seat);
         }
       })
       .catch(err => {
-        console.error("Could not fetch used seats.", err);
-        grid.innerHTML = `<p style="color:#e55073;">Could not load seat information. Please refresh the page to try again.</p>`;
+        console.error('Could not fetch used seats.', err);
+        grid.innerHTML = `<p style="color:#e55073;">Could not load seat information. You can continue locally.</p>`;
+        const row = document.createElement('div');
+        row.className = 'row';
+        const retry = document.createElement('button');
+        retry.className = 'btn'; retry.textContent = 'Retry';
+        retry.onclick = ()=>{ if (overlay.parentNode) overlay.parentNode.removeChild(overlay); setupSeatSelection(); };
+        const cont = document.createElement('button');
+        cont.className = 'btn primary'; cont.textContent = 'Continue (local)';
+        cont.onclick = ()=>{ participantId = 'local-'+Date.now(); if (overlay.parentNode) overlay.parentNode.removeChild(overlay); const tourBubbleEl = document.getElementById('tour-bubble'); if (tourBubbleEl) tourBubbleEl.classList.add('visible'); };
+        row.appendChild(retry); row.appendChild(cont); overlay.appendChild(row);
       });
   }
 
@@ -1061,6 +1756,9 @@ window.addEventListener('DOMContentLoaded', () => {
           The experiment contains two modes: <strong>Mode A</strong> (instant response) and <strong>Mode B</strong> (energy accumulation). Your experiment will start randomly from either A or B mode. The system will automatically switch between them. Please press the <strong>Spacebar</strong> when you feel the switch happening. The screen edge glow when you press.
         </p>
         <p class="welcome-text">
+          When you achieve <strong>several consecutive accurate presses</strong> (very close to the switch), the <strong>colored regions may relocate</strong> smoothly. This is expected and part of the challenge — please adjust the Hue first, then focus on detecting changes.
+        </p>
+        <p class="welcome-text">
           For the best experience, please use headphones.
         </p>
         <p class="welcome-text">
@@ -1074,7 +1772,7 @@ window.addEventListener('DOMContentLoaded', () => {
     const button = overlay.querySelector('.welcome-button');
     button.addEventListener('click', () => {
       overlay.classList.add('hidden');
-      // 等待淡出动画结束后再移除元素
+      // Wait for fade-out animation then remove overlay
       setTimeout(() => {
         if (overlay.parentNode) {
           overlay.parentNode.removeChild(overlay);

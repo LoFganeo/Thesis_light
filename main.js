@@ -2,6 +2,14 @@
 let mappingMode = 'A'; // 'A' = instant response, 'B' = accumulated slow fade
 let bandAccum = [0,0,0,0,0];
 const decayRate = 0.92; // energy decay factor in mode B
+// Mapping and sensitivity tuning
+const DEFAULT_BAND_ORIGINS = [0,1,2,3,4];
+const MAPPING_A_BASE_LEVEL = 0.08;
+const MAPPING_A_PEAK_SCALE = 0.72;
+const MAPPING_A_CLIP_PIVOT = 1.2;
+const MAPPING_A_CLIP_RATIO = 0.55;
+const HIGH_FREQ_SENSITIVITY = 0.58;
+const LOW_END_SENSITIVITY = 0.55;
 // === Global energy–audio sync offset ===
 let offsetMs = 0;
 let participantId = null; // set by seat selector
@@ -382,23 +390,29 @@ function draw() {
     }
     let row = energyData[frameIdx];
     if (mappingMode === 'A') {
-      for(let i=0;i<5;i++) bands[i] = row[i] || 0.09;
+      for (let i = 0; i < 5; i++) {
+        const raw = (typeof row[i] === 'number' && isFinite(row[i])) ? Math.max(row[i], 0) : MAPPING_A_BASE_LEVEL;
+        const baseVal = MAPPING_A_BASE_LEVEL;
+        const delta = Math.max(raw - baseVal, 0);
+        let scaled = baseVal + delta * MAPPING_A_PEAK_SCALE;
+        if (scaled > MAPPING_A_CLIP_PIVOT) {
+          scaled = MAPPING_A_CLIP_PIVOT + (scaled - MAPPING_A_CLIP_PIVOT) * MAPPING_A_CLIP_RATIO;
+        }
+        bands[i] = scaled;
+      }
     } else if (mappingMode === 'B') {
       // hi1/kick bands (0 and 4) have stronger damping + delay + higher threshold; other bands normal
       const minBase = [0.16, 0.11, 0.11, 0.11, 0.16];
-      const boostRateArr = [0.08, 0.16, 0.16, 0.16, 0.08];
-      const decayArr = [0.97, 0.92, 0.92, 0.92, 0.97];
+      const boostRateArr = [0.04, 0.08, 0.08, 0.08, 0.04];
+      const decayArr = [0.97, 0.94, 0.93, 0.94, 0.97];
       const gammaArr = [0.82, 0.78, 0.78, 0.78, 0.82];
-      // Response delay: hi1/kick use the average of previous 2 frames
+      // Response delay: use 3-frame smoothing on all bands
       if (!window.bandDelay) window.bandDelay = [[],[],[],[],[]];
       for(let i=0;i<5;i++) {
         let target = row[i] || minBase[i];
-        if (i===0 || i===4) {
-          // hi1/kick delay
-          window.bandDelay[i].push(target);
-          if (window.bandDelay[i].length>2) window.bandDelay[i].shift();
-          target = window.bandDelay[i].reduce((a,b)=>a+b,0)/window.bandDelay[i].length;
-        }
+        window.bandDelay[i].push(target);
+        if (window.bandDelay[i].length>3) window.bandDelay[i].shift();
+        target = window.bandDelay[i].reduce((a,b)=>a+b,0)/window.bandDelay[i].length;
         let extraBoost = (target - bandAccum[i]) * boostRateArr[i];
         bandAccum[i] = bandAccum[i]*decayArr[i] + target*(1-decayArr[i]) + extraBoost;
         bands[i] = Math.max(Math.pow(bandAccum[i], gammaArr[i]), minBase[i]);
@@ -419,7 +433,12 @@ function draw() {
     const mappedBands  = [ bands[sm[0]],  bands[sm[1]],  bands[sm[2]],  bands[sm[3]],  bands[sm[4]] ];
     auroraColors = mappedColors;
     bands = mappedBands;
+    window._bandOrigins = sm.slice();
+  } else {
+    window._bandOrigins = DEFAULT_BAND_ORIGINS.slice();
   }
+
+  const bandOrigins = window._bandOrigins || DEFAULT_BAND_ORIGINS;
 
   // === Dynamic focus point ===
   let time = millis()/1000;
@@ -513,7 +532,8 @@ function draw() {
       let colorA = auroraColors[maxIdx];
       let colorB = auroraColors[secondIdx];
       let band1 = bands[maxIdx];
-      let sensitivity1 = (maxIdx === 0) ? 0.65 : (maxIdx === 4) ? 0.55 : 1.0;
+      const origin1 = (bandOrigins && bandOrigins[maxIdx] !== undefined) ? bandOrigins[maxIdx] : maxIdx;
+      const sensitivity1 = (origin1 === 0 || origin1 === 1) ? HIGH_FREQ_SENSITIVITY : (origin1 === 4 ? LOW_END_SENSITIVITY : 1.0);
       band1 *= sensitivity1;
       let d1 = dist(x, y, bandCenters[maxIdx][0], bandCenters[maxIdx][1]);
       let focus1 = Math.exp(-d1*0.009) * band1;
@@ -524,7 +544,8 @@ function draw() {
       a1 *= 0.13 + 0.22*band1;
       let show1 = (val1 > energyThreshold1 && band1 > 0.01 && a1 > 1) ? 1 : 0;
       let band2 = bands[secondIdx];
-      let sensitivity2 = (secondIdx === 0) ? 0.65 : (secondIdx === 4) ? 0.55 : 1.0;
+      const origin2 = (bandOrigins && bandOrigins[secondIdx] !== undefined) ? bandOrigins[secondIdx] : secondIdx;
+      const sensitivity2 = (origin2 === 0 || origin2 === 1) ? HIGH_FREQ_SENSITIVITY : (origin2 === 4 ? LOW_END_SENSITIVITY : 1.0);
       band2 *= sensitivity2;
       let d2 = dist(x, y, bandCenters[secondIdx][0], bandCenters[secondIdx][1]);
       let focus2 = Math.exp(-d2*0.009) * band2;

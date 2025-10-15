@@ -22,11 +22,13 @@ module.exports = async (request, response) => {
     }
 
     const { rows } = await client.sql`
-      SELECT participant_id
+      SELECT participant_id, assigned_seat
       FROM thesis_sessions
       WHERE status IN ('pending', 'final')
     `;
-    const usedSeats = rows.map(r => r.participant_id);
+    const usedSeats = rows
+      .map(r => r.assigned_seat && r.assigned_seat.trim().length ? r.assigned_seat : r.participant_id)
+      .filter(Boolean);
     response.status(200).json({ seats: usedSeats, degraded: false });
   } catch (error) {
     console.error('[api/get-used-seats] Error fetching used seats:', error);

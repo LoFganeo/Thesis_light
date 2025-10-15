@@ -2,6 +2,28 @@
 let mappingMode = 'A'; // 'A' = instant response, 'B' = accumulated slow fade
 let bandAccum = [0,0,0,0,0];
 const decayRate = 0.92; // energy decay factor in mode B
+const QUALTRICS_PARAMS = (() => {
+  try {
+    const rawQuery = window.location ? (window.location.search || '') : '';
+    console.log('[Qualtrics] raw query:', rawQuery);
+    const params = new URLSearchParams(rawQuery);
+    console.log('[Qualtrics] params string:', params.toString());
+    const userIDRaw = params.get('userID');
+    const emailRaw = params.get('email');
+    const userID = userIDRaw ? userIDRaw.trim() : null;
+    const email = emailRaw ? emailRaw.trim() : null;
+    console.log('[Qualtrics] extracted userID/email:', userID, email);
+    return {
+      userID: userID && userID.length ? userID : null,
+      email: email && email.length ? email : null,
+      hasParams: !!(userIDRaw && userIDRaw.trim().length)
+    };
+  } catch (err) {
+    console.warn('Failed parsing Qualtrics params', err);
+    return { userID: null, email: null, hasParams: false };
+  }
+})();
+let assignedSeatId = null;
 // Mapping and sensitivity tuning
 const DEFAULT_BAND_ORIGINS = [0,1,2,3,4];
 const MAPPING_A_BASE_LEVEL = 0.08;
@@ -10,6 +32,7 @@ const MAPPING_A_CLIP_PIVOT = 1.2;
 const MAPPING_A_CLIP_RATIO = 0.55;
 const HIGH_FREQ_SENSITIVITY = 0.58;
 const LOW_END_SENSITIVITY = 0.55;
+const QUALTRICS_SURVEY_URL = 'https://nyu.qualtrics.com/jfe/form/SV_eCWOIY9iGjukpUO';
 // === Global energy–audio sync offset ===
 let offsetMs = 0;
 let participantId = null; // set by seat selector
@@ -47,6 +70,7 @@ function resetSessionStats() {
   sessionStats.keypressCount = 0;
   sessionStats.hitCount = 0;
   sessionStats.negativeHitCount = 0;
+  window.__thesisHasStartedPlayback = false;
 }
 
 function updatePlaybackStats() {
@@ -55,11 +79,11 @@ function updatePlaybackStats() {
   }
 }
 
-function recordKeypressMetrics(rt) {
-  sessionStats.keypressCount += 1;
-  if (typeof rt === 'number' && isFinite(rt)) {
-    if (rt >= 0 && rt <= 2.0) {
-      sessionStats.hitCount += 1;
+  function recordKeypressMetrics(rt) {
+    sessionStats.keypressCount += 1;
+    if (typeof rt === 'number' && isFinite(rt)) {
+      if (rt >= 0 && rt <= 2.0) {
+        sessionStats.hitCount += 1;
     } else if (rt < 0 && rt >= -2.0) {
       sessionStats.negativeHitCount += 1;
     }
@@ -89,6 +113,10 @@ function evaluateSessionStats(stats = sessionStats) {
     zeroHitButPressed,
     allNegativeHits
   };
+}
+
+function markPlaybackStarted(){
+  window.__thesisHasStartedPlayback = true;
 }
 
 // === Logging retry + telemetry ===
@@ -134,6 +162,21 @@ function enqueuePayload(queueKey, payload){
 
 function delay(ms){
   return new Promise(resolve => setTimeout(resolve, ms));
+}
+
+async function hashEmail(email) {
+  if (!email || !window.crypto || !window.crypto.subtle) return null;
+  try {
+    const normalized = email.trim().toLowerCase();
+    const encoder = new TextEncoder();
+    const data = encoder.encode(normalized);
+    const hashBuffer = await window.crypto.subtle.digest('SHA-256', data);
+    const hashArray = Array.from(new Uint8Array(hashBuffer));
+    return hashArray.map(b => b.toString(16).padStart(2, '0')).join('');
+  } catch (err) {
+    console.warn('Email hash failed', err);
+    return null;
+  }
 }
 
 async function sendWithRetry(endpoint, payload, attempt = 1){
@@ -936,7 +979,7 @@ window.addEventListener('DOMContentLoaded', () => {
     left: 0;
     width: 100%;
     height: 100%;
-    background: rgba(0, 0, 0, 0.9);
+    pointer-events: none;
     z-index: 9998;
     display: flex;
     align-items: center;
@@ -946,8 +989,14 @@ window.addEventListener('DOMContentLoaded', () => {
     font-size: 18vw;
     font-weight: 200;
     opacity: 0;
-    pointer-events: none;
     transition: opacity 0.3s ease;
+  }
+  #countdown-overlay::before {
+    content: '';
+    position: absolute;
+    inset: 0;
+    background: radial-gradient(circle at center, rgba(0,0,0,0.35) 0%, rgba(0,0,0,0.0) 70%);
+    z-index: -1;
   }
   #countdown-overlay.visible {
     opacity: 1;
@@ -955,6 +1004,7 @@ window.addEventListener('DOMContentLoaded', () => {
   #countdown-number {
     transform: scale(0.5);
     opacity: 0;
+    text-shadow: 0 0 30px rgba(0,0,0,0.6), 0 0 12px rgba(78,205,196,0.4);
     transition: transform 0.45s cubic-bezier(0.2, 1, 0.3, 1), opacity 0.45s ease;
   }
   #countdown-number.show {
@@ -1343,22 +1393,20 @@ window.addEventListener('DOMContentLoaded', () => {
             clearInterval(countdownInterval);
             countdownOverlay.classList.remove('visible');
             audio.play();
+            markPlaybackStarted();
             window._previewLights = false;
             setPlayIcon();
           }
         }, 1000);
       } else {
         audio.play();
+        markPlaybackStarted();
         window._previewLights = false;
         setPlayIcon();
       }
     } else {
       audio.pause();
       setPlayIcon();
-      // If paused before end, confirm finish
-      if (audio.currentTime > 0 && audio.currentTime < (isFinite(audio.duration)? audio.duration-0.2 : 1e9)) {
-        confirmFinishDialog();
-      }
     }
   }
   if (sampleSelect){
@@ -1369,14 +1417,10 @@ window.addEventListener('DOMContentLoaded', () => {
       window.audio = audio;
       audioLoaded = false;
       audio.oncanplay = () => { audioLoaded = true; setPlayIcon(); };
-      audio.onplay = () => { pauseCSV(); startModeAutoSwitch(); };
+      audio.onplay = () => { pauseCSV(); startModeAutoSwitch(); markPlaybackStarted(); };
       audio.onpause = () => {
-        pauseCSV(); stopModeAutoSwitch();
-        try{
-          if (audio && isFinite(audio.duration) && audio.currentTime > 0 && audio.currentTime < audio.duration - 0.2) {
-            if (!window._finishingDialogOpen) confirmFinishDialog();
-          }
-        }catch(e){}
+        pauseCSV();
+        stopModeAutoSwitch();
       };
       audio.onended = () => { pauseCSV(); stopModeAutoSwitch(); setPlayIcon(); try{ showFeedbackSlider(); }catch(e){} };
       energyFrame = 0;
@@ -1470,89 +1514,41 @@ window.addEventListener('DOMContentLoaded', () => {
       <div class="welcome-content">
         <h1 class="welcome-title">Thank you for participating!</h1>
         <p class="welcome-text">${message}</p>
-        <div style="margin-top:18px;display:flex;gap:10px;align-items:center;justify-content:center;font-size:14px;opacity:.9">
-          <span>Do you want to start again?</span>
-          <button class="btn" id="thanks-restart">Yes</button>
-        </div>
       </div>`;
     document.body.appendChild(overlay);
-    // Stay on Thank You screen; allow restart
-    const restartBtn = overlay.querySelector('#thanks-restart');
-    if (restartBtn){
-      restartBtn.onclick = ()=>{
-        try{ if (overlay.parentNode) overlay.parentNode.removeChild(overlay); }catch(e){}
-        lastFinalizeResult = null;
-        setupSeatSelection();
-      };
-    }
   }
 
-  // Finish confirmation when pausing mid-song
-  function confirmFinishDialog(){
+  function showQualtricsRedirect(message) {
+    ['welcome-overlay','thanks-overlay','qualtrics-redirect-overlay'].forEach(id => {
+      const el = document.getElementById(id);
+      if (el && el.parentNode) el.parentNode.removeChild(el);
+    });
+
     const overlay = document.createElement('div');
-    overlay.id = 'finish-overlay';
-    window._finishingDialogOpen = true;
+    overlay.id = 'qualtrics-redirect-overlay';
     overlay.style.position = 'fixed';
-    overlay.style.inset = '0';
-    overlay.style.background = 'rgba(0,0,0,0.6)';
-    overlay.style.zIndex = '12000';
+    overlay.style.top = '0';
+    overlay.style.left = '0';
+    overlay.style.width = '100%';
+    overlay.style.height = '100%';
+    overlay.style.background = '#000';
+    overlay.style.zIndex = '10000';
     overlay.style.display = 'flex';
+    overlay.style.flexDirection = 'column';
     overlay.style.alignItems = 'center';
     overlay.style.justifyContent = 'center';
+    overlay.style.fontFamily = '-apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif';
+    overlay.style.color = '#fff';
+    overlay.style.textAlign = 'center';
+    overlay.style.padding = '20px';
+    overlay.style.boxSizing = 'border-box';
     overlay.innerHTML = `
-      <div class="welcome-content" style="
-        background: rgba(30,32,40,0.92);
-        backdrop-filter: saturate(1.1) blur(12px);
-        -webkit-backdrop-filter: saturate(1.1) blur(12px);
-        border: 1px solid rgba(78,205,196,0.30);
-        border-radius: 14px;
-        padding: 18px 22px;
-        max-width: 520px;
-        color: #fff;
-        box-shadow: 0 10px 28px rgba(0,0,0,0.35), 0 0 22px rgba(78,205,196,0.18);
-      ">
-        <h2 style="margin:0 0 8px 0; color:#eafaf8; text-shadow:0 0 8px rgba(78,205,196,0.35)">Do you wish to finish?</h2>
-        <p style="margin:6px 0 0 0; opacity:.85">You can submit feedback now or continue listening.</p>
-        <div style="display:flex; gap:12px; justify-content:center; margin-top:12px">
-          <button class="btn" id="fin-no">No</button>
-          <button class="btn primary" id="fin-yes">Yes</button>
-        </div>
-      </div>`;
+      <div class="welcome-content">
+        <h1 class="welcome-title">Almost there</h1>
+        <p class="welcome-text">${message}</p>
+      </div>
+    `;
     document.body.appendChild(overlay);
-    overlay.querySelector('#fin-no').onclick = ()=>{ overlay.style.opacity='0'; setTimeout(()=>{ if (overlay.parentNode) overlay.parentNode.removeChild(overlay); window._finishingDialogOpen=false; }, 200); };
-    overlay.querySelector('#fin-yes').onclick = async ()=>{
-      updatePlaybackStats();
-      const evaluation = evaluateSessionStats();
-      let proceedToFeedback = true;
-
-      if (!evaluation.meetsAll && sessionStats.playbackSeconds >= VALIDATION_THRESHOLDS.reminderPlaybackSeconds) {
-        const message = 'Data has not yet met the analysis criteria. Continue for another 10–20 seconds to include this session in the study?';
-        const continuePlayback = window.confirm(message);
-        if (continuePlayback) {
-          overlay.style.opacity='0';
-          setTimeout(()=>{
-            if (overlay.parentNode) overlay.parentNode.removeChild(overlay);
-            window._finishingDialogOpen=false;
-            try{
-              if (audio && audio.paused) {
-                audio.play();
-                setPlayIcon();
-              }
-            }catch(e){}
-          }, 200);
-          proceedToFeedback = false;
-        }
-      }
-
-      if (!proceedToFeedback) {
-        return;
-      }
-
-      pendingFinalizeAction = evaluation.meetsAll ? 'complete' : 'cancel';
-      try{ if (audio && !audio.paused) audio.pause(); }catch(e){}
-      overlay.style.opacity='0';
-      setTimeout(()=>{ if (overlay.parentNode) overlay.parentNode.removeChild(overlay); window._finishingDialogOpen=false; showFeedbackSlider(); }, 200);
-    };
   }
 
   let logCount = 0;
@@ -1608,6 +1604,35 @@ window.addEventListener('DOMContentLoaded', () => {
       });
   }
 
+  window.addEventListener('beforeunload', (event) => {
+    if (!sessionId || !participantId) return;
+    const hasStarted = !!window.__thesisHasStartedPlayback;
+    if (!hasStarted) return;
+    const stats = evaluateSessionStats();
+    const shouldCancel = true;
+    const payload = {
+      action: shouldCancel ? 'cancel' : 'complete',
+      sessionId,
+      sentCount: transmitStats.sentCount,
+      droppedCount: 0,
+      hadCountdown: !!featureUsage.hadCountdown,
+      stats: {
+        playbackSeconds: Number(sessionStats.playbackSeconds.toFixed(2)),
+        keypressCount: sessionStats.keypressCount,
+        hitCount: sessionStats.hitCount,
+        negativeHitCount: sessionStats.negativeHitCount
+      }
+    };
+    try {
+      const blob = new Blob([JSON.stringify(payload)], { type: 'application/json' });
+      navigator.sendBeacon('/api/finish-session', blob);
+    } catch (err) {
+      try {
+        navigator.sendBeacon && navigator.sendBeacon('/api/finish-session', JSON.stringify(payload));
+      } catch (_) {}
+    }
+  });
+
   // Hold-to-show (Backquote) + shortcuts
   let backquoteHeld = false;
   function showHiddenPanels(){ samplePanel.style.display = 'block'; modePanel.style.display = 'block'; offsetPanel.style.display = 'block'; }
@@ -1643,14 +1668,43 @@ window.addEventListener('DOMContentLoaded', () => {
     if (isBackquote) { backquoteHeld = false; hideHiddenPanels(); }
   });
 
-  async function startNewSession(pId) {
+  function applyInitialSlotMapping() {
+    try {
+      if (typeof window._slotMap === 'undefined') window._slotMap = [0,1,2,3,4];
+      const base = [0,1,2,3,4];
+      const method = (Math.random() < 0.8) ? 'rotate' : 'mirror';
+      const rot = (arr,k)=> arr.map((_,i)=> arr[(i - k + arr.length)%arr.length]);
+      if (method === 'rotate') {
+        const step = Math.random() < 0.5 ? 1 : 2;
+        window._slotMap = rot(base, step);
+        window._currentMappingLabel = `r${step}`;
+      } else {
+        if (Math.random() < 0.5) {
+          window._slotMap = [ base[1], base[0], base[2], base[4], base[3] ];
+          window._currentMappingLabel = 'mh';
+        } else {
+          window._slotMap = [ base[3], base[4], base[2], base[0], base[1] ];
+          window._currentMappingLabel = 'mv';
+        }
+      }
+      window._lastSpatialSwitchT = 0;
+      window._previewLights = true;
+    } catch (err) {
+      console.warn('init spatial mapping failed', err);
+    }
+  }
+
+  async function startNewSession(pId, options = {}) {
     const songId = 'stem-full';
 
     try {
+      const payloadBody = { participantId: pId, songId };
+      if (options.assignedSeat) payloadBody.assignedSeat = options.assignedSeat;
+      if (options.emailHash) payloadBody.emailHash = options.emailHash;
       const res = await fetch('/api/start-session', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ participantId: pId, songId })
+        body: JSON.stringify(payloadBody)
       });
 
       let payload = {};
@@ -1751,6 +1805,8 @@ window.addEventListener('DOMContentLoaded', () => {
       }
       sessionId = null;
       participantId = null;
+      assignedSeatId = null;
+      window._assignedSeatId = null;
       resetSessionStats();
       sessionFinalized = false;
     } catch (error) {
@@ -1779,6 +1835,7 @@ window.addEventListener('DOMContentLoaded', () => {
 
         try {
           await startNewSession(participantId);
+          applyInitialSlotMapping();
         } catch (error) {
           participantId = null;
           seat.dataset.state = 'idle';
@@ -1795,9 +1852,60 @@ window.addEventListener('DOMContentLoaded', () => {
            // Show tour bubble
           const tourBubble = document.getElementById('tour-bubble');
           if (tourBubble) tourBubble.classList.add('visible');
+          const hueB = document.getElementById('hue-bubble');
+          setTimeout(()=>{ if (hueB) hueB.classList.add('visible'); }, 1200);
         }, 300);
       });
     });
+  }
+
+  async function autoAssignSeat(params) {
+    const { userID, email } = params || {};
+    if (!userID) throw new Error('Missing Qualtrics userID');
+
+    try {
+      console.log('[Qualtrics] autoAssignSeat start for userID:', userID);
+      const res = await fetch('/api/get-used-seats');
+      if (!res.ok) throw new Error(`API responded with ${res.status}`);
+      const payload = await res.json();
+      const used = Array.isArray(payload)
+        ? payload
+        : Array.isArray(payload?.seats)
+          ? payload.seats
+          : [];
+
+      let chosenSeat = null;
+      for (let i = 1; i <= 100; i++) {
+        const seatId = `seat-${i}`;
+        if (!used.includes(seatId)) {
+          chosenSeat = seatId;
+          break;
+        }
+      }
+
+      if (!chosenSeat) {
+        throw new Error('No available seat for auto-assignment');
+      }
+
+      const emailHash = email ? await hashEmail(email) : null;
+      assignedSeatId = chosenSeat;
+      window._assignedSeatId = assignedSeatId;
+      participantId = userID;
+
+      const options = { assignedSeat: chosenSeat };
+      if (emailHash) options.emailHash = emailHash;
+
+      await startNewSession(userID, options);
+      console.log('[Qualtrics] Auto-assigned seat to participant:', { userID, seat: chosenSeat, emailHash });
+
+      applyInitialSlotMapping();
+      return { seatId: chosenSeat, emailHash };
+    } catch (error) {
+      console.error('[Qualtrics] autoAssignSeat error:', error);
+      participantId = null;
+      assignedSeatId = null;
+      throw error;
+    }
   }
 
   // Seat selection overlay (100 seats: seat-1 ... seat-100) with fetch + fallback
@@ -1849,24 +1957,7 @@ window.addEventListener('DOMContentLoaded', () => {
             try {
               await startNewSession(participantId);
               console.log(`Seat selected: ${participantId}`);
-
-              // Randomize initial spatial mapping for this session (r1/r2 or mirrors)
-              try {
-                if (typeof window._slotMap === 'undefined') window._slotMap = [0,1,2,3,4];
-                const sm = [0,1,2,3,4];
-                const method = (Math.random() < 0.8) ? 'rotate' : 'mirror';
-                const rot = (arr,k)=> arr.map((_,i)=> arr[(i - k + arr.length)%arr.length]);
-                if (method === 'rotate'){
-                  const step = Math.random() < 0.5 ? 1 : 2;
-                  window._slotMap = rot(sm, step);
-                  window._currentMappingLabel = `r${step}`;
-                } else {
-                  if (Math.random()<0.5){ window._slotMap = [ sm[1], sm[0], sm[2], sm[4], sm[3] ]; window._currentMappingLabel='mh'; }
-                  else { window._slotMap = [ sm[3], sm[4], sm[2], sm[0], sm[1] ]; window._currentMappingLabel='mv'; }
-                }
-                window._lastSpatialSwitchT = 0;
-                window._previewLights = true; // enable preview lights for Step 1 hue selection
-              } catch(e){ console.warn('init spatial mapping failed', e); }
+              applyInitialSlotMapping();
 
               overlay.style.opacity = '0';
               setTimeout(() => {
@@ -1912,44 +2003,72 @@ window.addEventListener('DOMContentLoaded', () => {
   }
 
   function setupWelcomeScreen() {
+    const isAuto = QUALTRICS_PARAMS && QUALTRICS_PARAMS.hasParams;
+    console.log('[Qualtrics] setupWelcomeScreen mode ->', isAuto ? 'auto' : 'manual');
+
+    if (!isAuto) {
+      showQualtricsRedirect('This experiment is accessible only after completing the Qualtrics intake survey.');
+      return;
+    }
+
     const overlay = document.createElement('div');
     overlay.id = 'welcome-overlay';
     overlay.innerHTML = `
       <div class="welcome-content">
         <h1 class="welcome-title">Welcome</h1>
-        <p class="welcome-text">
-          You will experience a combined audiovisual content.
-        </p>
-        <p class="welcome-text">
-          The experiment contains two modes: <strong>Mode A</strong> (instant response) and <strong>Mode B</strong> (energy accumulation). Your experiment will start randomly from either A or B mode. The system will automatically switch between them. Please press the <strong>Spacebar</strong> when you feel the switch happening. The screen edge glow when you press.
-        </p>
-        <p class="welcome-text">
-          When you achieve <strong>several consecutive accurate presses</strong> (very close to the switch), the <strong>colored regions may relocate</strong> smoothly. This is expected and part of the challenge — please adjust the Hue first, then focus on detecting changes.
-        </p>
-        <p class="welcome-text">
-          For the best experience, please use headphones.
-        </p>
-        <p class="welcome-text">
-          Thank you for participating in this experiment!
-        </p>
+        <p class="welcome-text">Thank you for completing the Qualtrics survey.</p>
+        <p class="welcome-text">Press <strong>Enter</strong> to begin detecting mapping changes. Please wear headphones for the best experience.</p>
         <button class="welcome-button">Enter</button>
       </div>
     `;
+
     document.body.appendChild(overlay);
 
     const button = overlay.querySelector('.welcome-button');
-    button.addEventListener('click', () => {
-      overlay.classList.add('hidden');
-      // Wait for fade-out animation then remove overlay
-      setTimeout(() => {
-        if (overlay.parentNode) {
-          overlay.parentNode.removeChild(overlay);
+    if (!button) return;
+
+    const handleAuto = async () => {
+        if (button.disabled) return;
+        button.disabled = true;
+        button.classList.add('disabled');
+        console.log('[Qualtrics] Auto mode: Enter pressed, starting auto assignment');
+        try {
+          await autoAssignSeat(QUALTRICS_PARAMS);
+          console.log('[Qualtrics] Auto assignment success, fading welcome overlay');
+          overlay.classList.add('hidden');
+          setTimeout(() => {
+            if (overlay.parentNode) overlay.parentNode.removeChild(overlay);
+            const tourBubbleEl = document.getElementById('tour-bubble');
+            if (tourBubbleEl) tourBubbleEl.classList.add('visible');
+            const hueBubbleEl = document.getElementById('hue-bubble');
+            setTimeout(() => { if (hueBubbleEl) hueBubbleEl.classList.add('visible'); }, 1200);
+          }, 400);
+        } catch (error) {
+          console.error('[Qualtrics] Automatic session start failed', error);
+          const msg = (error && /participant already has an active session/i.test(String(error.message || '')))
+            ? 'Records show this email has already tested. Please return to Qualtrics and use a new survey link.'
+            : 'Automatic start failed. Please return to Qualtrics to request a new survey link.';
+          overlay.classList.add('hidden');
+          setTimeout(() => {
+            if (overlay.parentNode) overlay.parentNode.removeChild(overlay);
+            showQualtricsRedirect(msg);
+          }, 400);
         }
-      }, 500);
-      setupSeatSelection();
+      };
+    button.addEventListener('click', handleAuto);
+    overlay.addEventListener('keydown', (e) => {
+      if (e.key === 'Enter') {
+        e.preventDefault();
+        console.log('[Qualtrics] Enter key captured on welcome overlay');
+        handleAuto();
+      }
     });
+    // focus button for immediate Enter capture
+    setTimeout(() => { button.focus(); }, 50);
   }
 
+  window._qualtricsParams = QUALTRICS_PARAMS;
+  console.log('[Qualtrics] window._qualtricsParams set to:', window._qualtricsParams);
   setupWelcomeScreen();
 
 }); // end DOMContentLoaded

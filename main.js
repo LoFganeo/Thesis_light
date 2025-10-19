@@ -2134,10 +2134,13 @@ window.addEventListener('DOMContentLoaded', () => {
     overlay.style.textAlign = 'center';
     overlay.style.padding = '20px';
     overlay.style.boxSizing = 'border-box';
-    overlay.innerHTML = `
+  overlay.innerHTML = `
       <div class="welcome-content">
         <h1 class="welcome-title">Almost there</h1>
         <p class="welcome-text">${message}</p>
+        <p class="welcome-text">
+          <a href="${QUALTRICS_SURVEY_URL}" target="_blank" rel="noopener" style="color:#4ecdc4;text-decoration:underline;">Go to the Qualtrics survey</a>
+        </p>
       </div>
     `;
     document.body.appendChild(overlay);

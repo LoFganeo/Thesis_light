@@ -1,6 +1,9 @@
 // === Mapping Mode Switch ===
 let mappingMode = 'A'; // 'A' = instant response, 'B' = accumulated slow fade
 let bandAccum = [0,0,0,0,0];
+let shapeAccum = [0,0,0,0,0]; // 新添加，用于形态惯性
+let modeBAmbientAccum = [0,0,0,0,0];
+let modeBPrevFinal = [0,0,0,0,0];
 const decayRate = 0.92; // energy decay factor in mode B
 const QUALTRICS_PARAMS = (() => {
   try {
@@ -23,7 +26,8 @@ const QUALTRICS_PARAMS = (() => {
     return { userID: null, email: null, hasParams: false };
   }
 })();
-let assignedSeatId = null;
+let sessionStartOptions = null;
+let sessionStartPromise = null;
 // Mapping and sensitivity tuning
 const DEFAULT_BAND_ORIGINS = [0,1,2,3,4];
 const MAPPING_A_BASE_LEVEL = 0.08;
@@ -35,12 +39,15 @@ const LOW_END_SENSITIVITY = 0.55;
 const QUALTRICS_SURVEY_URL = 'https://nyu.qualtrics.com/jfe/form/SV_eCWOIY9iGjukpUO';
 // === Global energy–audio sync offset ===
 let offsetMs = 0;
-let participantId = null; // set by seat selector
+let participantId = null; // set from Qualtrics params
 let sessionId = null; // set by start-session API
 let lastSwitchTime = 0;   // updated on mode switch
 
 // Marker pulse overlay (Space key visual feedback)
 let markerPulse = null; // { start: millis(), duration: 900 }
+const SPACE_COOLDOWN_MS = 1000;
+let spaceHoldActive = false;
+let lastSpaceReleaseTime = 0;
 
 
 let auroraColors = [];
@@ -50,6 +57,54 @@ let colorHueOffset = 0;
 // Added: UI and overlay controls
 let showRing = true;
 let showUI = true;
+
+// === Real-time adjustment baseline ===
+const DEFAULT_GLOBAL_BRIGHTNESS = 2.4;
+const DEFAULT_MAPPING_A_BASE = 1.8;
+const DEFAULT_MAPPING_A_PEAK = 1.9;
+const DEFAULT_MAPPING_B_ATTACK = 0.15;
+const DEFAULT_MAPPING_B_RELEASE = 0.010;
+const DEFAULT_MAPPING_B_MIN_BASE = 0.90;
+const DEFAULT_MAPPING_B_GAMMA = 1.10;
+const DEFAULT_SHAPE_SIGMA = 1.15;
+const DEFAULT_SHAPE_BIAS = 1.50;
+const MODE_B_LOOKAHEAD_SEC = 0.25;
+const MODE_B_LOOKAHEAD_DECAY = 0.9;
+const MODE_B_FAST_FLOOR_BLEND = 0.3;
+const MODE_B_AMBIENT_DECAY = 0.97;
+const MODE_B_SHAPE_DECAY = 0.99;
+const MODE_B_DIFF_THRESHOLD = 0.18;
+const MODE_B_DECAY_FLOOR = 0.82;
+const MODE_B_BASELINE_DEFAULT_FRAMES = 12;
+const MODE_B_PEAK_THRESHOLD = 0.12;
+const MODE_B_PEAK_STD_MULT = 0.8;
+const MODE_B_BASELINE_STD_FALLOFF = 0.5;
+
+let modeBBaselineFrames = [MODE_B_BASELINE_DEFAULT_FRAMES, MODE_B_BASELINE_DEFAULT_FRAMES, MODE_B_BASELINE_DEFAULT_FRAMES, MODE_B_BASELINE_DEFAULT_FRAMES, MODE_B_BASELINE_DEFAULT_FRAMES];
+let modeBPeakThresholds = [MODE_B_PEAK_THRESHOLD, MODE_B_PEAK_THRESHOLD, MODE_B_PEAK_THRESHOLD, MODE_B_PEAK_THRESHOLD, MODE_B_PEAK_THRESHOLD];
+let modeBNextPeakFrames = null;
+let modeBPrevPeakFrames = null;
+
+const globalAdjust = {
+  brightnessScale: DEFAULT_GLOBAL_BRIGHTNESS
+};
+
+const mappingAAdjust = {
+  baseScale: DEFAULT_MAPPING_A_BASE,
+  peakScale: DEFAULT_MAPPING_A_PEAK
+};
+
+const mappingBAdjust = {
+  attack: DEFAULT_MAPPING_B_ATTACK,
+  release: DEFAULT_MAPPING_B_RELEASE,
+  minBaseScale: DEFAULT_MAPPING_B_MIN_BASE,
+  gammaScale: DEFAULT_MAPPING_B_GAMMA
+};
+
+const shapeAdjust = {
+  sigmaScale: DEFAULT_SHAPE_SIGMA,
+  biasScale: DEFAULT_SHAPE_BIAS
+};
 
 const VALIDATION_THRESHOLDS = {
   minPlaybackSeconds: 30,
@@ -322,6 +377,7 @@ function preload() {
           }
           energyFrame = 0;
           try{ computeGlobalSaliency(); }catch(e){ console.warn('Saliency compute failed', e); }
+          try{ computeModeBPeakBaselines(); }catch(e){ console.warn('ModeB baseline compute failed', e); }
         } catch (err) {
           console.warn('Failed processing CSV results:', err);
           energyLoaded = false;
@@ -374,6 +430,87 @@ function computeGlobalSaliency(){
   console.log('[Saliency] global scores', S.map(v=>v.toFixed(3)), 'main=', pairs[0]);
 }
 
+function computeModeBPeakBaselines(){
+  if (!energyData || !energyData.length) {
+    modeBBaselineFrames = new Array(5).fill(MODE_B_BASELINE_DEFAULT_FRAMES);
+    modeBNextPeakFrames = null;
+    modeBPrevPeakFrames = null;
+    return;
+  }
+  const n = energyData.length;
+  const bands = Math.min(5, energyData[0] ? energyData[0].length : 0);
+  modeBBaselineFrames = new Array(5).fill(MODE_B_BASELINE_DEFAULT_FRAMES);
+  modeBPeakThresholds = new Array(5).fill(MODE_B_PEAK_THRESHOLD);
+  modeBNextPeakFrames = Array.from({length:5}, ()=> new Array(n).fill(Infinity));
+  modeBPrevPeakFrames = Array.from({length:5}, ()=> new Array(n).fill(Infinity));
+
+  for (let b=0; b<bands; b++) {
+    const energies = energyData.map(row => {
+      const val = row && typeof row[b] === 'number' && isFinite(row[b]) ? row[b] : 0;
+      return Math.max(val, 0);
+    });
+    const peaks = [];
+    const energyMean = energies.reduce((sum,v)=>sum+v,0) / energies.length;
+    const energyVar = energies.reduce((sum,v)=> sum + Math.pow(v - energyMean, 2), 0) / energies.length;
+    const energyStd = Math.sqrt(Math.max(energyVar, 1e-12));
+    const dynamicThreshold = Math.max(MODE_B_PEAK_THRESHOLD, energyMean + MODE_B_PEAK_STD_MULT * energyStd);
+    modeBPeakThresholds[b] = dynamicThreshold;
+    for (let i=1; i<n-1; i++) {
+      const v = energies[i];
+      if (v >= energies[i-1] && v > energies[i+1] && v >= dynamicThreshold) {
+        peaks.push(i);
+      }
+    }
+    if (!peaks.length) {
+      continue;
+    }
+    const intervals = [];
+    for (let i=1; i<peaks.length; i++) {
+      const gap = peaks[i] - peaks[i-1];
+      if (gap > 0) intervals.push(gap);
+    }
+    if (intervals.length) {
+      const intMean = intervals.reduce((sum,v)=>sum+v,0)/intervals.length;
+      const intVar = intervals.reduce((sum,v)=> sum + Math.pow(v - intMean,2),0)/intervals.length;
+      const intStd = Math.sqrt(Math.max(intVar, 1e-6));
+      const baseline = Math.max(1, Math.round(intMean - MODE_B_BASELINE_STD_FALLOFF * intStd));
+      modeBBaselineFrames[b] = baseline;
+    }
+
+    const first = peaks[0];
+    for (let i=0; i<=first && i<n; i++) {
+      modeBNextPeakFrames[b][i] = first - i;
+    }
+    for (let p=0; p<peaks.length-1; p++) {
+      const curr = peaks[p];
+      const next = peaks[p+1];
+      for (let i=curr; i<next && i<n; i++) {
+        modeBNextPeakFrames[b][i] = next - i;
+      }
+    }
+    const last = peaks[peaks.length-1];
+    for (let i=last; i<n; i++) {
+      modeBNextPeakFrames[b][i] = Infinity;
+    }
+
+    for (let i=0; i<first && i<n; i++) {
+      modeBPrevPeakFrames[b][i] = first - i;
+    }
+    for (let p=0; p<peaks.length-1; p++) {
+      const curr = peaks[p];
+      const next = peaks[p+1];
+      for (let i=curr; i<next && i<n; i++) {
+        modeBPrevPeakFrames[b][i] = i - curr;
+      }
+    }
+    const lastPeak = peaks[peaks.length-1];
+    for (let i=lastPeak; i<n; i++) {
+      modeBPrevPeakFrames[b][i] = i - lastPeak;
+    }
+  }
+  modeBPrevFinal = [0,0,0,0,0];
+}
+
 function setup() {
   let cnv = createCanvas(window.innerWidth, window.innerHeight);
   cnv.parent('p5-holder');
@@ -423,6 +560,7 @@ function draw() {
 
   // === Drive with CSV energy ===
   let bands = [0.09,0.09,0.09,0.09,0.09];
+  let shapeBands = [0.09,0.09,0.09,0.09,0.09];
   if (energyLoaded && energyData.length > 0) {
     let frameIdx = 0;
     if (window.audio && !window.audio.paused && !isNaN(window.audio.currentTime)) {
@@ -433,34 +571,142 @@ function draw() {
     }
     let row = energyData[frameIdx];
     if (mappingMode === 'A') {
+      const baseFactor = Math.max(0, mappingAAdjust.baseScale);
+      const peakFactor = Math.max(0, mappingAAdjust.peakScale);
       for (let i = 0; i < 5; i++) {
         const raw = (typeof row[i] === 'number' && isFinite(row[i])) ? Math.max(row[i], 0) : MAPPING_A_BASE_LEVEL;
-        const baseVal = MAPPING_A_BASE_LEVEL;
-        const delta = Math.max(raw - baseVal, 0);
-        let scaled = baseVal + delta * MAPPING_A_PEAK_SCALE;
+        const baseVal = MAPPING_A_BASE_LEVEL * baseFactor;
+        const delta = Math.max(raw - MAPPING_A_BASE_LEVEL, 0);
+        let scaled = baseVal + delta * MAPPING_A_PEAK_SCALE * peakFactor;
         if (scaled > MAPPING_A_CLIP_PIVOT) {
           scaled = MAPPING_A_CLIP_PIVOT + (scaled - MAPPING_A_CLIP_PIVOT) * MAPPING_A_CLIP_RATIO;
         }
         bands[i] = scaled;
+        shapeBands[i] = scaled;
       }
     } else if (mappingMode === 'B') {
       // hi1/kick bands (0 and 4) have stronger damping + delay + higher threshold; other bands normal
-      const minBase = [0.16, 0.11, 0.11, 0.11, 0.16];
-      const boostRateArr = [0.04, 0.08, 0.08, 0.08, 0.04];
-      const decayArr = [0.97, 0.94, 0.93, 0.94, 0.97];
-      const gammaArr = [0.82, 0.78, 0.78, 0.78, 0.82];
+      const minBaseBase = [0.16, 0.11, 0.11, 0.11, 0.16];
+      const boostRateBase = [0.04, 0.08, 0.08, 0.08, 0.04];
+      const decayBase = [0.94, 0.88, 0.88, 0.88, 0.94];
+      const gammaBase = [0.82, 0.78, 0.78, 0.78, 0.82];
+
+      const baseAttack = DEFAULT_MAPPING_B_ATTACK || 1;
+      const baseRelease = DEFAULT_MAPPING_B_RELEASE || 1;
+      const attackRatio = baseAttack ? (Math.max(0, mappingBAdjust.attack) / baseAttack) : 1;
+      const releaseRatio = baseRelease ? (Math.max(0, mappingBAdjust.release) / baseRelease) : 1;
+      const floorScale = Math.max(0, mappingBAdjust.minBaseScale);
+      const gammaScale = Math.max(0.1, mappingBAdjust.gammaScale);
+
+      const minBase = minBaseBase.map(v => v * floorScale);
+      const boostRateArr = boostRateBase.map((v,idx) => {
+        if (idx === 3) return v * attackRatio * 0.6;
+        return v * attackRatio;
+      });
+      const decayArr = decayBase.map((v,idx) => {
+        const base = 1 - Math.min(0.99, (1 - v) * releaseRatio);
+        if (idx === 3) return Math.max(0.90, base);
+        return base;
+      });
+      const gammaArr = gammaBase.map(v => Math.max(0.1, Math.min(2.0, v * gammaScale)));
+
+      const lookaheadFramesBase = Math.max(1, Math.round(csvFps * MODE_B_LOOKAHEAD_SEC));
+      const ambientDecay = MODE_B_AMBIENT_DECAY;
+      const shapeDecayRate = MODE_B_SHAPE_DECAY;
+      const shapeBoostRate = 1.0 - shapeDecayRate;
+
       // Response delay: use 3-frame smoothing on all bands
       if (!window.bandDelay) window.bandDelay = [[],[],[],[],[]];
-      for(let i=0;i<5;i++) {
-        let target = row[i] || minBase[i];
-        window.bandDelay[i].push(target);
-        if (window.bandDelay[i].length>3) window.bandDelay[i].shift();
-        target = window.bandDelay[i].reduce((a,b)=>a+b,0)/window.bandDelay[i].length;
-        let extraBoost = (target - bandAccum[i]) * boostRateArr[i];
-        bandAccum[i] = bandAccum[i]*decayArr[i] + target*(1-decayArr[i]) + extraBoost;
-        bands[i] = Math.max(Math.pow(bandAccum[i], gammaArr[i]), minBase[i]);
+      if (typeof window._bandSmoothB === 'undefined') {
+        window._bandSmoothB = [0,0,0,0,0];
+      }
+      const prevRow = (energyData && energyData.length) ? energyData[Math.max(0, frameIdx-1)] || row : row;
+      const nextRow = (energyData && energyData.length) ? energyData[Math.min(energyData.length-1, frameIdx+1)] || row : row;
+      for(let i=0; i<5; i++) {
+        let currentEnergy = row[i] || minBase[i];
+
+        let brightnessTarget = currentEnergy;
+        let lookaheadFrames = lookaheadFramesBase;
+        let lookaheadDecay = MODE_B_LOOKAHEAD_DECAY;
+        if (i === 3) {
+          lookaheadFrames = Math.round(lookaheadFramesBase * 1.35);
+          lookaheadDecay *= 0.75;
+        }
+        if (energyData && energyData.length) {
+          const futureLimit = Math.min(energyData.length - 1, frameIdx + lookaheadFrames);
+          for (let step = 1, idx = frameIdx + 1; idx <= futureLimit; idx++, step++) {
+            const futureRow = energyData[idx];
+            if (!futureRow) break;
+            const futureVal = futureRow[i] || minBase[i];
+            const weight = Math.exp(-step * lookaheadDecay);
+            brightnessTarget = Math.max(brightnessTarget, futureVal * weight);
+          }
+        }
+        brightnessTarget = Math.min(1, brightnessTarget);
+
+        window.bandDelay[i].push(brightnessTarget);
+        if (window.bandDelay[i].length > 3) window.bandDelay[i].shift();
+        brightnessTarget = window.bandDelay[i].reduce((a,b) => a+b, 0) / window.bandDelay[i].length;
+
+        // --- 快速亮度池 ---
+        const prevEnergy = prevRow ? (prevRow[i] || minBase[i]) : currentEnergy;
+        const nextEnergy = nextRow ? (nextRow[i] || minBase[i]) : currentEnergy;
+        const diffPrev = Math.abs(currentEnergy - prevEnergy);
+        const diffNext = Math.abs(nextEnergy - currentEnergy);
+        const diffMetric = Math.max(diffPrev, diffNext);
+        const diffRatio = Math.min(1, diffMetric / MODE_B_DIFF_THRESHOLD);
+        const closeness = 1 - diffRatio;
+
+        let boostFactor = boostRateArr[i] * (0.5 + 0.5 * diffRatio);
+        if (i === 3) boostFactor = boostFactor * (0.7 + 0.3 * diffRatio);
+
+        let decayFactor = decayArr[i] - closeness * 0.08;
+        decayFactor = Math.max(MODE_B_DECAY_FLOOR, Math.min(decayFactor, 0.995));
+
+        let extraBoost = (brightnessTarget - bandAccum[i]) * boostFactor;
+        bandAccum[i] = bandAccum[i] * decayFactor + brightnessTarget * (1 - decayFactor) + extraBoost;
+        let fastValue = Math.max(Math.pow(bandAccum[i], gammaArr[i]), minBase[i]);
+        shapeBands[i] = fastValue;
+
+        // --- 慢速（环境）亮度池 ---
+        modeBAmbientAccum[i] = modeBAmbientAccum[i] * ambientDecay + brightnessTarget * (1 - ambientDecay);
+        const ambientValue = Math.max(modeBAmbientAccum[i], minBase[i]);
+        let finalBandValue = fastValue * (1 - MODE_B_FAST_FLOOR_BLEND) + ambientValue * MODE_B_FAST_FLOOR_BLEND;
+
+        const baselineFrames = modeBBaselineFrames[i] || MODE_B_BASELINE_DEFAULT_FRAMES;
+        const framesToNext = (modeBNextPeakFrames && modeBNextPeakFrames[i]) ? modeBNextPeakFrames[i][frameIdx] : baselineFrames;
+        const framesSincePrev = (modeBPrevPeakFrames && modeBPrevPeakFrames[i]) ? modeBPrevPeakFrames[i][frameIdx] : baselineFrames;
+        const proximity = Math.min(framesToNext, framesSincePrev);
+        if (proximity <= baselineFrames) {
+          finalBandValue = Math.max(finalBandValue, modeBPrevFinal[i] || finalBandValue);
+          bandAccum[i] = Math.max(bandAccum[i], finalBandValue);
+          modeBAmbientAccum[i] = Math.max(modeBAmbientAccum[i], finalBandValue);
+        }
+        modeBPrevFinal[i] = finalBandValue;
+
+        // --- 新增逻辑：对 hi1 (i=0) 应用额外平滑 ---
+        if (i === 0) {
+          const smoothFactor = 0.85;
+          const prevSmoothed = window._bandSmoothB[i] || finalBandValue;
+          finalBandValue = prevSmoothed * smoothFactor + finalBandValue * (1.0 - smoothFactor);
+          window._bandSmoothB[i] = finalBandValue;
+        } else {
+          window._bandSmoothB[i] = finalBandValue;
+        }
+
+        bands[i] = finalBandValue;
+
+        // --- 更新“形态”能量池 (慢时钟) ---
+        const shapeEnergy = closeness > 0.5 ? (currentEnergy * 0.6 + nextEnergy * 0.4) : currentEnergy;
+        shapeAccum[i] = shapeAccum[i] * shapeDecayRate + shapeEnergy * shapeBoostRate;
       }
     }
+
+    const brightnessScale = Math.max(0, globalAdjust.brightnessScale);
+    for (let i=0;i<5;i++) {
+      bands[i] = Math.max(0, bands[i] * brightnessScale);
+    }
+
     // Update bandHistory
     for (let i=0;i<5;i++) {
       bandHistory[i].push(bands[i]);
@@ -506,8 +752,8 @@ function draw() {
     ];
   }
   if (!window._bandSigmaArr) {
-    let baseSigma = Math.min(width, height)*0.28;
-    window._bandSigmaArr = [baseSigma, baseSigma, baseSigma, baseSigma, baseSigma];
+    let baseSigmaInit = Math.min(width, height)*0.28;
+    window._bandSigmaArr = [baseSigmaInit, baseSigmaInit, baseSigmaInit, baseSigmaInit, baseSigmaInit];
   }
   let baseSigma = Math.min(width, height)*0.28;
   let bandCenters = [];
@@ -517,12 +763,36 @@ function draw() {
     // Dynamic perturbation + energy bias
     let cx0 = [width*0.25, width*0.75, width*0.5, width*0.25, width*0.75][i];
     let cy0 = [height*0.22, height*0.22, height*0.5, height*0.78, height*0.78][i];
-    let dx = Math.sin(t*0.13 + i*1.2)*width*0.026 + Math.cos(t*0.21 + i*0.7)*width*0.017;
-    let dy = Math.cos(t*0.11 + i*1.7)*height*0.024 + Math.sin(t*0.19 + i*0.9)*height*0.016;
+    const perturbScale = (mappingMode === 'B') ? 0.35 : 1;
+    let dx = perturbScale * (Math.sin(t*0.13 + i*1.2)*width*0.026 + Math.cos(t*0.21 + i*0.7)*width*0.017);
+    let dy = perturbScale * (Math.cos(t*0.11 + i*1.7)*height*0.024 + Math.sin(t*0.19 + i*0.9)*height*0.016);
     // Energy bias (under high energy shift slightly toward center)
-    let bandE = bands ? bands[i] : 0.1;
-    let centerBiasX = (width/2 - cx0) * bandE * 0.11;
-    let centerBiasY = (height/2 - cy0) * bandE * 0.11;
+    let bandE = shapeBands ? shapeBands[i] : 0.1;
+    let centerBiasBaseX = (width/2 - cx0) * bandE * 0.06;
+    let centerBiasBaseY = (height/2 - cy0) * bandE * 0.06;
+    let centerBiasScale;
+    if (mappingMode === 'B') {
+      const slowState = shapeAccum[i];
+      const biasMin = 1.0;
+      const biasMax = DEFAULT_SHAPE_BIAS;
+      const mappedBias = (typeof map === 'function')
+        ? map(slowState, 0, 1, biasMin, biasMax)
+        : biasMin + (biasMax - biasMin) * slowState;
+      const baseBiasScale = DEFAULT_SHAPE_BIAS || 1;
+      const sliderBiasRatio = baseBiasScale ? (shapeAdjust.biasScale / baseBiasScale) : 1;
+      centerBiasScale = mappedBias * sliderBiasRatio;
+      centerBiasScale = Math.min(centerBiasScale, 0.7);
+    } else {
+      centerBiasScale = shapeAdjust.biasScale;
+    }
+    const biasAttenuation = (mappingMode === 'B') ? 0.35 : 1;
+    let centerBiasX = centerBiasBaseX * centerBiasScale * biasAttenuation;
+    let centerBiasY = centerBiasBaseY * centerBiasScale * biasAttenuation;
+    if (mappingMode === 'B') {
+      const biasClamp = Math.min(1, bandE / 0.6);
+      centerBiasX *= biasClamp;
+      centerBiasY *= biasClamp;
+    }
     let cx = cx0 + dx + centerBiasX;
     let cy = cy0 + dy + centerBiasY;
     // Smooth transition
@@ -541,8 +811,32 @@ function draw() {
     let sigmaBase = baseSigma * (0.98 + 0.07*Math.sin(t*0.21+i*0.8));
     let sigmaEnergy = 1.0 + bandE*0.22;
     let sigma = sigmaBase * sigmaEnergy * (0.97 + 0.06*Math.cos(t*0.17+i*1.3));
+    if (mappingMode === 'B') {
+      sigma = baseSigma + (sigma - baseSigma) * (2/3);
+    }
+    if (mappingMode === 'B') {
+      const maxScale = 0.9;
+      sigma = Math.min(sigma, baseSigma * maxScale);
+    }
     // hi1/kick slightly narrower
-    if (i===0||i===4) sigma *= 0.93;
+    if (i===0||i===4) {
+      const narrowFactor = 0.93;
+      sigma *= mappingMode === 'B' ? (1 - (1 - narrowFactor) * (2/3)) : narrowFactor;
+    }
+    if (mappingMode === 'B') {
+      const slowState = shapeAccum[i];
+      const sigmaMinScale = DEFAULT_SHAPE_SIGMA;
+      const sigmaMaxScale = DEFAULT_SHAPE_SIGMA * 2.5;
+      const mappedSigma = (typeof map === 'function')
+        ? map(slowState, 0, 1, sigmaMinScale, sigmaMaxScale)
+        : sigmaMinScale + (sigmaMaxScale - sigmaMinScale) * slowState;
+      const baseSigmaScale = DEFAULT_SHAPE_SIGMA || 1;
+      const sliderSigmaRatio = baseSigmaScale ? (shapeAdjust.sigmaScale / baseSigmaScale) : 1;
+      const combinedScale = mappedSigma * sliderSigmaRatio;
+      sigma *= 1 + (combinedScale - 1) * (2/3);
+    } else {
+      sigma *= shapeAdjust.sigmaScale;
+    }
     // Smoothing
     let prevSigma = window._bandSigmaArr[i];
     let sigmaSmooth = 0.82;
@@ -571,7 +865,7 @@ function draw() {
         if (i === maxIdx) { weights[i] *= 1.12; } else { weights[i] *= 0.38; }
       }
       let sumW = weights.reduce((a,b)=>a+b,0);
-      for (let i=0; i<5; i++) weights[i] = Math.pow(weights[i]/sumW, 1.18);
+      for (let i=0; i<5; i++) weights[i] = Math.pow(weights[i]/sumW, 1.0);
       let normSum = weights.reduce((a,b)=>a+b,0);
       for (let i=0; i<5; i++) weights[i] /= normSum;
 
@@ -777,7 +1071,7 @@ window.addEventListener('DOMContentLoaded', () => {
   const style = document.createElement('style');
   style.id = 'ui-style';
   style.textContent = `
-  .glass-panel{background:rgba(30,32,40,0.92);backdrop-filter:saturate(1.1) blur(8px);-webkit-backdrop-filter:saturate(1.1) blur(8px);border-radius:14px;box-shadow:0 6px 24px #000a;border:1px solid rgba(255,255,255,0.08)}
+  .glass-panel{background:rgba(30,32,40,0.55);backdrop-filter:saturate(1.1) blur(8px);-webkit-backdrop-filter:saturate(1.1) blur(8px);border-radius:14px;box-shadow:0 6px 24px rgba(0,0,0,0.35);border:1px solid rgba(255,255,255,0.05)}
   .btn{padding:6px 14px;border-radius:10px;border:none;color:#fff;background:rgba(255,255,255,0.08);cursor:pointer;font-weight:600;transition:.18s ease;min-height:32px;display:inline-flex;align-items:center}
   .btn:hover{background:rgba(255,255,255,0.16)}
   .btn.active{background:#4ecdc4;color:#222}
@@ -803,27 +1097,28 @@ window.addEventListener('DOMContentLoaded', () => {
   .header-chip .arrow{display:inline-block;opacity:.85;transition:transform .18s ease}
 
   /* Play FAB */
-  #play-fab{position:fixed;top:24px;right:24px;width:48px;height:48px;border-radius:50%;border:none;cursor:pointer;z-index:2300;display:flex;align-items:center;justify-content:center;font-size:20px;color:#fff;background:rgba(30,32,40,0.92);box-shadow:0 6px 24px #000a;border:1px solid rgba(255,255,255,0.08)}
+  #play-fab{position:fixed;top:24px;right:24px;width:48px;height:48px;border-radius:50%;border:none;cursor:pointer;z-index:2300;display:flex;align-items:center;justify-content:center;font-size:20px;color:#fff;background:rgba(30,32,40,0.55);box-shadow:0 6px 24px rgba(0,0,0,0.35);border:1px solid rgba(255,255,255,0.05)}
   #play-fab:hover{background:rgba(255,255,255,0.12)}
 
   /* New panels */
-  #sample-panel{position:fixed;top:16px;left:24px;z-index:2250;padding:10px 14px;background:rgba(30,32,40,0.98);border:1px solid rgba(255,255,255,0.35);box-shadow:0 8px 28px #000c;display:none}
-  #sample-panel label{color:#fff;opacity:.9;font-weight:600;letter-spacing:1px;margin-right:8px}
-  #sample-panel select{color:#fff;background:rgba(255,255,255,0.08);border:1px solid rgba(255,255,255,0.2);border-radius:10px;padding:6px 10px;outline:none}
-  #mode-panel{position:fixed;top:86px;left:24px;z-index:2250;padding:10px 14px;display:none;background:rgba(30,32,40,0.98);border:1px solid rgba(255,255,255,0.35);box-shadow:0 8px 28px #000c}
-  #offset-panel{position:fixed;top:168px;left:24px;z-index:2250;padding:10px 14px;display:none;background:rgba(30,32,40,0.98);border:1px solid rgba(255,255,255,0.35);box-shadow:0 8px 28px #000c}
+  #control-panel{position:fixed;top:16px;left:24px;z-index:2250;padding:14px 18px;display:none;background:rgba(24,26,32,0.55);border:1px solid rgba(255,255,255,0.05);box-shadow:0 8px 28px rgba(0,0,0,0.35);border-radius:16px;min-width:420px}
+  #control-panel .control-row{display:flex;align-items:center;gap:28px;flex-wrap:wrap}
+  #control-panel .mode-group{display:flex;align-items:center;gap:10px}
+  #control-panel .mode-group .btn{min-width:44px;justify-content:center}
+  #control-panel .offset-group{display:flex;align-items:center;gap:12px;flex:1;min-width:260px}
+  #control-panel .offset-group .offset-buttons{display:flex;gap:6px}
+  #control-panel .offset-group .btn{min-width:56px;justify-content:center}
+  #mapping-panel{position:fixed;top:104px;left:24px;width:380px;z-index:2250;padding:18px 24px 24px;display:none;background:rgba(24,26,32,0.55);border:1px solid rgba(255,255,255,0.05);box-shadow:0 10px 34px rgba(0,0,0,0.35);border-radius:18px;font-family:'SF Pro Display',-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif}
+  #mapping-panel .slider-row{display:flex;align-items:center;gap:14px;margin-top:14px}
+  #mapping-panel .slider-row:first-child{margin-top:0}
+  #mapping-panel .slider-label{flex:0 0 96px;color:rgba(255,255,255,0.86);font-weight:600;letter-spacing:0.6px}
+  #mapping-panel input[type=range]{flex:1;background:linear-gradient(90deg,rgba(105,224,213,0.85),rgba(156,244,235,0.9));height:6px;border-radius:4px;outline:none;-webkit-appearance:none;appearance:none}
+  #mapping-panel input[type=range]::-webkit-slider-thumb{-webkit-appearance:none;width:20px;height:20px;border-radius:50%;background:#fff;border:3px solid rgba(106,237,224,0.8);box-shadow:0 4px 12px rgba(0,0,0,0.35);cursor:pointer}
+  #mapping-panel input[type=range]::-moz-range-thumb{width:20px;height:20px;border-radius:50%;background:#fff;border:3px solid rgba(106,237,224,0.8);box-shadow:0 4px 12px rgba(0,0,0,0.35);cursor:pointer}
+  #mapping-panel .badge{min-width:62px;height:30px;padding:0 10px;border-radius:12px;background:rgba(255,255,255,0.12);color:#f5f9ff;font-weight:600;display:flex;align-items:center;justify-content:center;letter-spacing:0.4px}
   
-  /* Seat Selection Overlay */
-  #seat-overlay{position:fixed;top:0;left:0;width:100%;height:100%;background:rgba(10,12,18,0.98);z-index:9999;display:flex;flex-direction:column;align-items:center;justify-content:flex-start;padding-top:15vh;color:#fff;font-family:sans-serif;backdrop-filter:blur(8px);-webkit-backdrop-filter:blur(8px);}
-  #seat-overlay h1{font-weight:300;letter-spacing:2px;margin-bottom:10px;}
-  #seat-overlay p{opacity:0.8;margin-top:0;margin-bottom:40px;}
-  #seat-grid{display:grid;grid-template-columns:repeat(10, 1fr);gap:12px;max-width:600px;}
-  .seat-box{width:40px;height:40px;background:rgba(255,255,255,0.1);border:1px solid rgba(255,255,255,0.2);border-radius:8px;display:flex;align-items:center;justify-content:center;font-weight:600;cursor:pointer;transition:all .18s ease;}
-  .seat-box.available:hover{background:#4ecdc4;color:#111;transform:scale(1.1);}
-  .seat-box.used{background:#e55073;color:rgba(255,255,255,0.5);cursor:not-allowed;opacity:0.5;}
-
   /* Welcome Screen */
-  #welcome-overlay, #song-overlay, #feedback-overlay, #thanks-overlay {
+  #welcome-overlay, #song-overlay, #feedback-overlay, #thanks-overlay, #mode-compare-overlay {
     position: fixed;
     top: 0;
     left: 0;
@@ -843,9 +1138,14 @@ window.addEventListener('DOMContentLoaded', () => {
     opacity: 1;
     transition: opacity 0.5s ease-out;
   }
-  #welcome-overlay.hidden, #song-overlay.hidden, #feedback-overlay.hidden, #thanks-overlay.hidden {
+  #welcome-overlay.hidden, #song-overlay.hidden, #feedback-overlay.hidden, #thanks-overlay.hidden, #mode-compare-overlay.hidden {
     opacity: 0;
     pointer-events: none;
+  }
+  #mode-compare-overlay.instant {
+    opacity: 1;
+    pointer-events: auto;
+    transition: none !important;
   }
   .welcome-content {
     max-width: 680px;
@@ -856,14 +1156,14 @@ window.addEventListener('DOMContentLoaded', () => {
     margin-bottom: 20px;
     color: #fff;
     text-shadow:
-      0 0 7px #fff,
-      0 0 10px #fff,
-      0 0 21px #fff,
-      0 0 42px #4ecdc4,
-      0 0 82px #4ecdc4,
-      0 0 92px #4ecdc4,
-      0 0 102px #4ecdc4,
-      0 0 151px #4ecdc4;
+      0 0 7px rgba(255,255,255,0.45),
+      0 0 10px rgba(255,255,255,0.45),
+      0 0 21px rgba(255,255,255,0.45),
+      0 0 42px rgba(78,205,196,0.45),
+      0 0 82px rgba(78,205,196,0.45),
+      0 0 92px rgba(78,205,196,0.45),
+      0 0 102px rgba(78,205,196,0.45),
+      0 0 151px rgba(78,205,196,0.45);
   }
   .welcome-text {
     font-size: 18px;
@@ -890,6 +1190,48 @@ window.addEventListener('DOMContentLoaded', () => {
   .welcome-button:hover {
     background-color: #f0f0f0;
     transform: scale(1.05);
+  }
+  .mode-demo-grid{
+    display:flex;
+    gap:32px;
+    justify-content:center;
+    align-items:flex-start;
+    margin:32px 0 24px;
+    flex-wrap:wrap;
+  }
+  .mode-demo-item{
+    display:flex;
+    flex-direction:column;
+    align-items:center;
+    width:28vw;
+    max-width:360px;
+    min-width:220px;
+  }
+  .mode-demo-item video{
+    width:100%;
+    height:auto;
+    border-radius:16px;
+    box-shadow:0 20px 60px rgba(0,0,0,0.35);
+    background:#000;
+  }
+  .mode-demo-label{
+    margin-top:12px;
+    font-size:18px;
+    font-weight:600;
+    letter-spacing:1px;
+    color:#ffffff;
+    text-transform:uppercase;
+  }
+  .welcome-content.mode-preview{
+    max-width:980px;
+    width:calc(100% - 48px);
+  }
+  .mode-preview .mode-line{
+    max-width:860px;
+    margin:20px auto;
+  }
+  .mode-preview .mode-line + .mode-demo-grid{
+    margin-top:32px;
   }
   .song-grid { display: grid; grid-template-columns: repeat(3, minmax(160px, 1fr)); gap: 16px; margin-top: 18px; }
   .song-card { background: rgba(255,255,255,0.06); border: 1px solid rgba(255,255,255,0.15); border-radius: 12px; padding: 14px; }
@@ -1047,39 +1389,31 @@ window.addEventListener('DOMContentLoaded', () => {
   document.body.appendChild(colorToolbar);
   window.huePanelEl = colorToolbar;
 
-  // New: Sample panel (top-left)
-  const samplePanel = document.createElement('div');
-  samplePanel.id = 'sample-panel';
-  samplePanel.className = 'glass-panel';
-  samplePanel.innerHTML = `<div class="row" id="sample-row"></div>`;
-  document.body.appendChild(samplePanel);
-
-  // New: Mode and Offset panels (left side, show only while holding Backquote)
-  const modePanel = document.createElement('div');
-  modePanel.id = 'mode-panel';
-  modePanel.className = 'glass-panel';
-  modePanel.innerHTML = `
-    <div class="row">
-      <span class="panel-label">Mode</span>
-      <button id="mapping-a-btn" class="btn" title="Switch to A (A)">A</button>
-      <button id="mapping-b-btn" class="btn" title="Switch to B (B)">B</button>
+  // New: Combined Mode & Offset control panel (top-left)
+  const controlPanel = document.createElement('div');
+  controlPanel.id = 'control-panel';
+  controlPanel.className = 'glass-panel';
+  controlPanel.innerHTML = `
+    <div class="control-row">
+      <div class="mode-group">
+        <span class="panel-label">Mode</span>
+        <button id="mapping-a-btn" class="btn" title="Switch to A (A)">A</button>
+        <button id="mapping-b-btn" class="btn" title="Switch to B (B)">B</button>
+        <button id="mode-firm-btn" class="btn mini-btn" title="Pin current mode">Firm</button>
+      </div>
+      <div class="offset-group">
+        <span class="panel-label">Offset</span>
+        <input type="range" id="offset-slider" min="-2000" max="2000" step="1" style="flex:1;">
+        <span id="offset-value" class="badge">0</span>
+        <div class="offset-buttons">
+          <button id="offset-m50" class="btn mini-btn" title="-50ms ([)">-50</button>
+          <button id="offset-p50" class="btn mini-btn" title="+50ms (])">+50</button>
+        </div>
+      </div>
     </div>
   `;
-  document.body.appendChild(modePanel);
+  document.body.appendChild(controlPanel);
 
-  const offsetPanel = document.createElement('div');
-  offsetPanel.id = 'offset-panel';
-  offsetPanel.className = 'glass-panel';
-  offsetPanel.innerHTML = `
-    <div class="row">
-      <span class="panel-label">Offset</span>
-      <input type="range" id="offset-slider" min="-2000" max="2000" step="1" style="width:260px;">
-      <span id="offset-value" class="badge">0</span>
-      <button id="offset-m50" class="btn mini-btn" title="-50ms ([)">-50</button>
-      <button id="offset-p50" class="btn mini-btn" title="+50ms (])">+50</button>
-    </div>
-  `;
-  document.body.appendChild(offsetPanel);
   // Bind offset slider
   const offsetSlider = document.getElementById('offset-slider');
   const offsetValue = document.getElementById('offset-value');
@@ -1091,6 +1425,192 @@ window.addEventListener('DOMContentLoaded', () => {
       offsetMs = Math.max(-2000, Math.min(2000, v));
       offsetValue.textContent = String(offsetMs);
     };
+  }
+  const offsetMinusBtn = document.getElementById('offset-m50');
+  const offsetPlusBtn = document.getElementById('offset-p50');
+  if (offsetMinusBtn && offsetSlider && offsetValue) {
+    offsetMinusBtn.addEventListener('click', () => {
+      offsetMs = Math.max(-2000, offsetMs - 50);
+      offsetSlider.value = String(offsetMs);
+      offsetValue.textContent = String(offsetMs);
+    });
+  }
+  if (offsetPlusBtn && offsetSlider && offsetValue) {
+    offsetPlusBtn.addEventListener('click', () => {
+      offsetMs = Math.min(2000, offsetMs + 50);
+      offsetSlider.value = String(offsetMs);
+      offsetValue.textContent = String(offsetMs);
+    });
+  }
+
+  // Mapping adjustment panel (Backquote hold)
+  const mappingPanel = document.createElement('div');
+  mappingPanel.id = 'mapping-panel';
+  mappingPanel.className = 'glass-panel';
+  mappingPanel.innerHTML = `
+    <div class="slider-row">
+      <span class="slider-label">Global</span>
+      <input type="range" id="global-slider" min="0" max="300" step="1">
+      <span id="global-value" class="badge">240%</span>
+    </div>
+    <div class="slider-row">
+      <span class="slider-label">A Base</span>
+      <input type="range" id="a-base-slider" min="0" max="300" step="1">
+      <span id="a-base-value" class="badge">170%</span>
+    </div>
+    <div class="slider-row">
+      <span class="slider-label">A Peak</span>
+      <input type="range" id="a-peak-slider" min="0" max="300" step="1">
+      <span id="a-peak-value" class="badge">195%</span>
+    </div>
+    <div class="slider-row" style="margin-top:18px;">
+      <span class="slider-label">Shape σ</span>
+      <input type="range" id="shape-sigma-slider" min="0" max="200" step="1">
+      <span id="shape-sigma-value" class="badge">115%</span>
+    </div>
+    <div class="slider-row">
+      <span class="slider-label">Shape Bias</span>
+      <input type="range" id="shape-bias-slider" min="0" max="300" step="1">
+      <span id="shape-bias-value" class="badge">150%</span>
+    </div>
+    <div class="slider-row" style="margin-top:18px;">
+      <span class="slider-label">B Attack</span>
+      <input type="range" id="b-attack-slider" min="0" max="200" step="1">
+      <span id="b-attack-value" class="badge">15%</span>
+    </div>
+    <div class="slider-row">
+      <span class="slider-label">B Release</span>
+      <input type="range" id="b-release-slider" min="0" max="200" step="1">
+      <span id="b-release-value" class="badge">10‰</span>
+    </div>
+    <div class="slider-row">
+      <span class="slider-label">B Floor</span>
+      <input type="range" id="b-floor-slider" min="0" max="200" step="1">
+      <span id="b-floor-value" class="badge">90%</span>
+    </div>
+    <div class="slider-row">
+      <span class="slider-label">B Gamma</span>
+      <input type="range" id="b-gamma-slider" min="0" max="300" step="1">
+      <span id="b-gamma-value" class="badge">110%</span>
+    </div>
+  `;
+  document.body.appendChild(mappingPanel);
+
+  const globalSlider = document.getElementById('global-slider');
+  const globalValue = document.getElementById('global-value');
+  if (globalSlider && globalValue) {
+    const init = Math.round(globalAdjust.brightnessScale * 100);
+    globalSlider.value = String(init);
+    globalValue.textContent = `${init}%`;
+    globalSlider.addEventListener('input', (event) => {
+      const val = Math.max(0, Math.min(300, parseInt(event.target.value, 10) || init));
+      globalAdjust.brightnessScale = val / 100;
+      globalValue.textContent = `${val}%`;
+    });
+  }
+
+  const aBaseSlider = document.getElementById('a-base-slider');
+  const aBaseValue = document.getElementById('a-base-value');
+  if (aBaseSlider && aBaseValue) {
+    const init = Math.round(mappingAAdjust.baseScale * 100);
+    aBaseSlider.value = String(init);
+    aBaseValue.textContent = `${init}%`;
+    aBaseSlider.addEventListener('input', (event) => {
+      const val = Math.max(0, Math.min(300, parseInt(event.target.value, 10) || init));
+      mappingAAdjust.baseScale = val / 100;
+      aBaseValue.textContent = `${val}%`;
+    });
+  }
+
+  const aPeakSlider = document.getElementById('a-peak-slider');
+  const aPeakValue = document.getElementById('a-peak-value');
+  if (aPeakSlider && aPeakValue) {
+    const init = Math.round(mappingAAdjust.peakScale * 100);
+    aPeakSlider.value = String(init);
+    aPeakValue.textContent = `${init}%`;
+    aPeakSlider.addEventListener('input', (event) => {
+      const val = Math.max(0, Math.min(300, parseInt(event.target.value, 10) || init));
+      mappingAAdjust.peakScale = val / 100;
+      aPeakValue.textContent = `${val}%`;
+    });
+  }
+
+  const shapeSigmaSlider = document.getElementById('shape-sigma-slider');
+  const shapeSigmaValue = document.getElementById('shape-sigma-value');
+  if (shapeSigmaSlider && shapeSigmaValue) {
+    const init = Math.round(shapeAdjust.sigmaScale * 100);
+    shapeSigmaSlider.value = String(init);
+    shapeSigmaValue.textContent = `${init}%`;
+    shapeSigmaSlider.addEventListener('input', (event) => {
+      const val = Math.max(0, Math.min(200, parseInt(event.target.value, 10) || init));
+      shapeAdjust.sigmaScale = val / 100;
+      shapeSigmaValue.textContent = `${val}%`;
+    });
+  }
+
+  const shapeBiasSlider = document.getElementById('shape-bias-slider');
+  const shapeBiasValue = document.getElementById('shape-bias-value');
+  if (shapeBiasSlider && shapeBiasValue) {
+    const init = Math.round(shapeAdjust.biasScale * 100);
+    shapeBiasSlider.value = String(init);
+    shapeBiasValue.textContent = `${init}%`;
+    shapeBiasSlider.addEventListener('input', (event) => {
+      const val = Math.max(0, Math.min(300, parseInt(event.target.value, 10) || init));
+      shapeAdjust.biasScale = val / 100;
+      shapeBiasValue.textContent = `${val}%`;
+    });
+  }
+
+  const bAttackSlider = document.getElementById('b-attack-slider');
+  const bAttackValue = document.getElementById('b-attack-value');
+  if (bAttackSlider && bAttackValue) {
+    const init = Math.round(mappingBAdjust.attack * 100);
+    bAttackSlider.value = String(init);
+    bAttackValue.textContent = `${init}%`;
+    bAttackSlider.addEventListener('input', (event) => {
+      const val = Math.max(0, Math.min(200, parseInt(event.target.value, 10) || init));
+      mappingBAdjust.attack = val / 100;
+      bAttackValue.textContent = `${val}%`;
+    });
+  }
+
+  const bReleaseSlider = document.getElementById('b-release-slider');
+  const bReleaseValue = document.getElementById('b-release-value');
+  if (bReleaseSlider && bReleaseValue) {
+    const init = Math.round(mappingBAdjust.release * 1000);
+    bReleaseSlider.value = String(init);
+    bReleaseValue.textContent = `${init}‰`;
+    bReleaseSlider.addEventListener('input', (event) => {
+      const val = Math.max(0, Math.min(200, parseInt(event.target.value, 10) || init));
+      mappingBAdjust.release = val / 1000;
+      bReleaseValue.textContent = `${val}‰`;
+    });
+  }
+
+  const bFloorSlider = document.getElementById('b-floor-slider');
+  const bFloorValue = document.getElementById('b-floor-value');
+  if (bFloorSlider && bFloorValue) {
+    const init = Math.round(mappingBAdjust.minBaseScale * 100);
+    bFloorSlider.value = String(init);
+    bFloorValue.textContent = `${init}%`;
+    bFloorSlider.addEventListener('input', (event) => {
+      const val = Math.max(0, Math.min(200, parseInt(event.target.value, 10) || init));
+      mappingBAdjust.minBaseScale = val / 100;
+      bFloorValue.textContent = `${val}%`;
+    });
+  }
+
+  const bGammaSlider = document.getElementById('b-gamma-slider');
+  const bGammaValue = document.getElementById('b-gamma-value');
+  if (bGammaSlider && bGammaValue) {
+    const init = Math.round(mappingBAdjust.gammaScale * 100);
+    bGammaSlider.value = String(init);
+    bGammaValue.textContent = `${init}%`;
+    bGammaSlider.addEventListener('input', (event) => {
+      const val = Math.max(0, Math.min(300, parseInt(event.target.value, 10) || init));
+      mappingBAdjust.gammaScale = val / 100;
+      bGammaValue.textContent = `${val}%`;
+    });
   }
 
   // New: Guided Tour Bubble
@@ -1113,6 +1633,60 @@ window.addEventListener('DOMContentLoaded', () => {
   countdownOverlay.innerHTML = '<div id="countdown-number"></div>';
   document.body.appendChild(countdownOverlay);
 
+  const modeCompareOverlay = document.createElement('div');
+  modeCompareOverlay.id = 'mode-compare-overlay';
+  modeCompareOverlay.classList.add('hidden');
+  modeCompareOverlay.innerHTML = `
+    <div class="welcome-content mode-preview">
+      <h1 class="welcome-title">Mode Mapping Preview</h1>
+      <p class="welcome-text mode-line">The experiment contains two modes: <strong>Mode A</strong> (instant response) and <strong>Mode B</strong> (energy accumulation). Your experiment will start randomly from either A or B mode. The system will automatically switch between them.</p>
+      <p class="welcome-text mode-line">Please press the <strong>Spacebar</strong> when you feel the switch happening. The screen edges glow when you press.</p>
+      <div class="mode-demo-grid">
+        <div class="mode-demo-item">
+          <video src="./videos/M-A.mp4" autoplay muted loop playsinline></video>
+          <span class="mode-demo-label">Mode A</span>
+        </div>
+        <div class="mode-demo-item">
+          <video src="./videos/M-B.mp4" autoplay muted loop playsinline></video>
+          <span class="mode-demo-label">Mode B</span>
+        </div>
+      </div>
+      <p class="welcome-text mode-line">When you achieve <strong>several consecutive accurate presses</strong> (very close to the switch), the <strong>colored regions may relocate</strong> smoothly. This is expected and part of the challenge — please adjust the Hue first, then focus on detecting changes.</p>
+      <button class="welcome-button" id="mode-compare-continue">Continue</button>
+    </div>
+  `;
+  document.body.appendChild(modeCompareOverlay);
+  const modeCompareContinueBtn = modeCompareOverlay.querySelector('#mode-compare-continue');
+
+  function showGuidedBubbles(){
+    const tourBubbleEl = document.getElementById('tour-bubble');
+    if (tourBubbleEl) tourBubbleEl.classList.add('visible');
+    const hueBubbleEl = document.getElementById('hue-bubble');
+    if (hueBubbleEl) hueBubbleEl.classList.add('visible');
+  }
+
+  let modeCompareShown = false;
+  function showModeCompareOverlay(next){
+    if (modeCompareShown) {
+      if (typeof next === 'function') next();
+      return;
+    }
+    modeCompareShown = true;
+    modeCompareOverlay.classList.add('instant');
+    modeCompareOverlay.classList.remove('hidden');
+    requestAnimationFrame(() => {
+      modeCompareOverlay.classList.remove('instant');
+    });
+    const handleContinue = () => {
+      modeCompareOverlay.classList.add('hidden');
+      modeCompareContinueBtn.removeEventListener('click', handleContinue);
+      setTimeout(() => {
+        if (typeof next === 'function') next();
+      }, 350);
+    };
+    modeCompareContinueBtn.addEventListener('click', handleContinue);
+  }
+
   // --- LOGIC ---
 
   // Randomize starting mode
@@ -1128,20 +1702,22 @@ window.addEventListener('DOMContentLoaded', () => {
     if (window.audio) {
       lastSwitchTime = window.audio.currentTime;
     }
-    if (mode === 'A') {
-      mappingMode = 'A';
-    } else {
-      mappingMode = 'B';
-      if (energyLoaded && energyData.length > 0) {
-        let frameIdx = 0;
-        if (window.audio && !window.audio.paused && !isNaN(window.audio.currentTime)) {
-          frameIdx = Math.floor((window.audio.currentTime * csvFps) - (offsetMs / 1000 * csvFps));
-          frameIdx = Math.max(0, Math.min(energyData.length - 1, frameIdx));
-        } else {
-          frameIdx = energyFrame % energyData.length;
-        }
-        let row = energyData[frameIdx];
-        for(let i=0;i<5;i++) bandAccum[i] = row[i] || 0.09;
+    mappingMode = mode;
+    if (energyLoaded && energyData.length > 0) {
+      let frameIdx = 0;
+      if (window.audio && !window.audio.paused && !isNaN(window.audio.currentTime)) {
+        frameIdx = Math.floor((window.audio.currentTime * csvFps) - (offsetMs / 1000 * csvFps));
+        frameIdx = Math.max(0, Math.min(energyData.length - 1, frameIdx));
+      } else {
+        frameIdx = energyFrame % energyData.length;
+      }
+      const row = energyData[frameIdx];
+      for (let i=0;i<5;i++) {
+        const v = (row && typeof row[i] === 'number' && isFinite(row[i])) ? Math.max(row[i], 0) : 0.09;
+        bandAccum[i] = v;
+        modeBAmbientAccum[i] = v;
+        shapeAccum[i] = v;
+        modeBPrevFinal[i] = v;
       }
     }
     updateMappingUI();
@@ -1197,31 +1773,34 @@ window.addEventListener('DOMContentLoaded', () => {
         .catch(err => console.error('Switch log failed:', err));
     }catch(e){ console.warn('log switch failed', e); }
   }
+  let modeFirm = false;
   function updateMappingUI() {
     mappingABtn.classList.toggle('active', mappingMode==='A');
     mappingBBtn.classList.toggle('active', mappingMode==='B');
+    modeFirmBtn.classList.toggle('active', modeFirm);
+    modeFirmBtn.textContent = modeFirm ? 'Firm✓' : 'Firm';
   }
-  mappingABtn.onclick = () => { setMapping('A'); };
-  mappingBBtn.onclick = () => { setMapping('B'); };
+  mappingABtn.onclick = () => { if (!modeFirm) setMapping('A'); };
+  mappingBBtn.onclick = () => { if (!modeFirm) setMapping('B'); };
+  const modeFirmBtn = document.getElementById('mode-firm-btn');
+  if (modeFirmBtn) {
+    modeFirmBtn.addEventListener('click', () => {
+      modeFirm = !modeFirm;
+      if (modeFirm) {
+        stopModeAutoSwitch();
+      } else if (audio && !audio.paused) {
+        startModeAutoSwitch();
+      }
+      updateMappingUI();
+    });
+  }
   updateMappingUI();
-
-  // Move Sample label+select into Sample panel
-  const sampleSelect = document.getElementById('sample-select');
-  const sampleLabel = document.querySelector('label[for="sample-select"]');
-  const sampleRow = document.getElementById('sample-row');
-  if (sampleRow) {
-    if (sampleLabel) sampleRow.appendChild(sampleLabel);
-    if (sampleSelect) sampleRow.appendChild(sampleSelect);
-  }
-  // Ensure a default option exists for playback
-  if (sampleSelect && !sampleSelect.options.length) {
-    sampleSelect.innerHTML = '<option value="stems/stem-full.mp3">Sample 1</option>';
-  }
 
   // Audio wiring
   let audioLoaded = false;
   let audio;
   window.audio = null;
+  const DEFAULT_AUDIO_SRC = 'stems/stem-full.mp3';
   // Auto A/B switch scheduler (runs only while playing)
   let modeSwitchTimer = null;
   // --- Adaptive auto-switch config/state ---
@@ -1331,20 +1910,22 @@ window.addEventListener('DOMContentLoaded', () => {
     }catch(e){}
 
     console.debug('[AutoSwitch]', {difficulty, delay});
+    if (modeFirm) return;
     modeSwitchTimer = setTimeout(()=>{
       modeSwitchTimer = null;
       try{
-        if (audio && !audio.paused) {
+        if (audio && !audio.paused && !modeFirm) {
           // Always toggle to ensure a real switch (avoid logging no-op)
           const next = (mappingMode === 'A') ? 'B' : 'A';
           setMapping(next);
         }
       } finally {
-        if (audio && !audio.paused) scheduleNextModeSwitch();
+        if (audio && !audio.paused && !modeFirm) scheduleNextModeSwitch();
       }
     }, delay);
   }
   function startModeAutoSwitch(){
+    if (modeFirm) return;
     if (!modeSwitchTimer){
       console.debug('[AutoSwitch] start');
       goodStreak = 0;
@@ -1359,7 +1940,7 @@ window.addEventListener('DOMContentLoaded', () => {
   function playCSV(){ if (!csvPlaying){ csvPlaying = true; csvInterval = setInterval(()=>{ if (energyLoaded && csvPlaying){ energyFrame = (energyFrame + 1) % energyData.length; } }, 1000/csvFps); } }
   function pauseCSV(){ csvPlaying = false; if (csvInterval) clearInterval(csvInterval); }
   function setPlayIcon(){ playFab.textContent = (audio && !audio.paused && audioLoaded) ? '❚❚' : '▶'; }
-  function togglePlay(){
+  async function togglePlay(){
     if (!audioLoaded) return;
 
     // Hide both tour bubbles when play is clicked for the first time
@@ -1371,6 +1952,11 @@ window.addEventListener('DOMContentLoaded', () => {
     }
 
     if (audio.paused){
+      const ready = await ensureSessionStarted();
+      if (!ready) {
+        setPlayIcon();
+        return;
+      }
       if (featureConfig.enableCountdown) {
         featureUsage.hadCountdown = true;
         const countdownNumber = document.getElementById('countdown-number');
@@ -1409,26 +1995,30 @@ window.addEventListener('DOMContentLoaded', () => {
       setPlayIcon();
     }
   }
-  if (sampleSelect){
-    sampleSelect.onchange = () => {
-      if (audio){ audio.pause(); audio.currentTime = 0; audio.onended = null; }
+  const loadAudioSource = (src) => {
+    if (audio){
+      audio.pause();
+      audio.currentTime = 0;
+      audio.onended = null;
+    }
+    stopModeAutoSwitch();
+    modeBPrevFinal = [0,0,0,0,0];
+    audio = new Audio(src);
+    window.audio = audio;
+    audioLoaded = false;
+    audio.oncanplay = () => { audioLoaded = true; setPlayIcon(); };
+    audio.onplay = () => { pauseCSV(); startModeAutoSwitch(); markPlaybackStarted(); };
+    audio.onpause = () => {
+      pauseCSV();
       stopModeAutoSwitch();
-      audio = new Audio(sampleSelect.value);
-      window.audio = audio;
-      audioLoaded = false;
-      audio.oncanplay = () => { audioLoaded = true; setPlayIcon(); };
-      audio.onplay = () => { pauseCSV(); startModeAutoSwitch(); markPlaybackStarted(); };
-      audio.onpause = () => {
-        pauseCSV();
-        stopModeAutoSwitch();
-      };
-      audio.onended = () => { pauseCSV(); stopModeAutoSwitch(); setPlayIcon(); try{ showFeedbackSlider(); }catch(e){} };
-      energyFrame = 0;
-      setPlayIcon();
     };
-    sampleSelect.onchange();
-  }
-  playFab.onclick = togglePlay;
+    audio.onended = () => { pauseCSV(); stopModeAutoSwitch(); setPlayIcon(); try{ showFeedbackSlider(); }catch(e){} };
+    energyFrame = 0;
+    setPlayIcon();
+  };
+
+  loadAudioSource(DEFAULT_AUDIO_SRC);
+  playFab.onclick = () => { togglePlay().catch(err => console.error('togglePlay failed', err)); };
 
   // Hover behaviors for color panel only
   colorToolbar.addEventListener('mouseenter', ()=>{ colorToolbar.classList.add('expanded'); window._hueHovered = true; });
@@ -1454,12 +2044,12 @@ window.addEventListener('DOMContentLoaded', () => {
       <div class="welcome-content">
         <h1 class="welcome-title">Feedback</h1>
         <p class="welcome-text">How many times do you think the mode switched?</p>
-        <input type="range" min="1" max="30" step="1" value="8" id="fb-count" class="nicer-range" />
-        <div id="fb-count-wrap" style="display:none;margin-top:10px;font-size:24px;font-weight:700;letter-spacing:1px"><span id="fb-count-val"></span></div>
+        <input type="range" min="1" max="30" step="1" value="15" id="fb-count" class="nicer-range" />
+        <div id="fb-count-wrap" style="margin-top:10px;font-size:24px;font-weight:700;letter-spacing:1px"><span id="fb-count-val"></span></div>
         <div style="margin-top:18px"></div>
         <p class="welcome-text">How difficult was it?</p>
         <input type="range" min="1" max="5" step="1" value="3" id="fb-diff" class="nicer-range" />
-        <div id="fb-diff-wrap" style="display:none;margin-top:10px;font-size:20px;font-weight:700;letter-spacing:1px">Difficulty: <span id="fb-diff-val"></span></div>
+        <div id="fb-diff-wrap" style="margin-top:10px;font-size:20px;font-weight:700;letter-spacing:1px">Difficulty: <span id="fb-diff-val"></span></div>
         <div style="margin-top:16px;display:flex;justify-content:center">
           <button class="welcome-button" id="fb-submit">Submit</button>
         </div>
@@ -1473,8 +2063,10 @@ window.addEventListener('DOMContentLoaded', () => {
     const diffWrap = overlay.querySelector('#fb-diff-wrap');
     const btn = overlay.querySelector('#fb-submit');
     // Show values only when the user interacts
-    slider.oninput = ()=>{ out.textContent = slider.value; outWrap.style.display='block'; };
-    diffSlider.oninput = ()=>{ diffOut.textContent = diffSlider.value; diffWrap.style.display='block'; };
+    out.textContent = slider.value;
+    diffOut.textContent = diffSlider.value;
+    slider.oninput = ()=>{ out.textContent = slider.value; };
+    diffSlider.oninput = ()=>{ diffOut.textContent = diffSlider.value; };
     btn.onclick = async ()=>{
       if (!sessionId) {
         alert('Session is not ready. Please wait a moment and try again.');
@@ -1556,7 +2148,7 @@ window.addEventListener('DOMContentLoaded', () => {
     // Trigger visual pulse immediately
     markerPulse = { start: millis(), duration: 450 };
 
-    // If no seat is selected or audio is not playing, do not log
+    // If the session is not started or audio is not playing, do not log
     if (!participantId || !sessionId || !window.audio || window.audio.paused) {
       console.warn('Log attempt failed: No participant ID, session ID, or audio not playing.');
       return;
@@ -1635,8 +2227,8 @@ window.addEventListener('DOMContentLoaded', () => {
 
   // Hold-to-show (Backquote) + shortcuts
   let backquoteHeld = false;
-  function showHiddenPanels(){ samplePanel.style.display = 'block'; modePanel.style.display = 'block'; offsetPanel.style.display = 'block'; }
-  function hideHiddenPanels(){ samplePanel.style.display = 'none'; modePanel.style.display = 'none'; offsetPanel.style.display = 'none'; }
+  function showHiddenPanels(){ controlPanel.style.display = 'block'; mappingPanel.style.display = 'block'; }
+  function hideHiddenPanels(){ controlPanel.style.display = 'none'; mappingPanel.style.display = 'none'; }
 
   window.addEventListener('keydown', (e)=>{
     const isBackquote = (e.code === 'Backquote')
@@ -1644,15 +2236,22 @@ window.addEventListener('DOMContentLoaded', () => {
       || e.keyCode === 192 || e.which === 192;
     if (isBackquote && !backquoteHeld) { backquoteHeld = true; showHiddenPanels(); }
     if (e.target && ['INPUT','TEXTAREA','SELECT'].includes(e.target.tagName)) return;
-    if (e.key==='a' || e.key==='A'){ setMapping('A'); }
-    if (e.key==='b' || e.key==='B'){ setMapping('B'); }
+    if (!modeFirm && (e.key==='a' || e.key==='A')){ setMapping('A'); }
+    if (!modeFirm && (e.key==='b' || e.key==='B')){ setMapping('B'); }
     if (e.key==='h' || e.key==='H'){ hueRandBtn.click(); }
     if (e.key===']'){ const os = document.getElementById('offset-slider'); const ov = document.getElementById('offset-value'); if (os && ov){ offsetMs = Math.min(2000, offsetMs+50); os.value = offsetMs; ov.textContent = offsetMs; } }
     if (e.key==='['){ const os = document.getElementById('offset-slider'); const ov = document.getElementById('offset-value'); if (os && ov){ offsetMs = Math.max(-2000, offsetMs-50); os.value = offsetMs; ov.textContent = offsetMs; } }
     // Enter toggles play/pause
-    if (e.code==='Enter' || e.key==='Enter'){ e.preventDefault(); togglePlay(); }
+    if (e.code==='Enter' || e.key==='Enter'){ e.preventDefault(); togglePlay().catch(err => console.error('togglePlay failed', err)); }
     // Space triggers marker pulse and logs data
-    if (e.code==='Space' || e.key===' '){ e.preventDefault(); logAndTriggerPulse(); }
+    if (e.code==='Space' || e.key===' '){
+      e.preventDefault();
+      const now = Date.now();
+      if (spaceHoldActive) return;
+      if (lastSpaceReleaseTime && (now - lastSpaceReleaseTime) < SPACE_COOLDOWN_MS) return;
+      spaceHoldActive = true;
+      logAndTriggerPulse();
+    }
     if (e.key==='u' || e.key==='U'){
       const anyVisible = colorToolbar.style.display !== 'none' || playFab.style.display !== 'none';
       const disp = anyVisible ? 'none' : '';
@@ -1666,6 +2265,10 @@ window.addEventListener('DOMContentLoaded', () => {
       || ['`','~','·','～','｀','ˋ','‵','§','±','Dead'].includes(e.key)
       || e.keyCode === 192 || e.which === 192;
     if (isBackquote) { backquoteHeld = false; hideHiddenPanels(); }
+    if (e.code === 'Space' || e.key === ' '){
+      spaceHoldActive = false;
+      lastSpaceReleaseTime = Date.now();
+    }
   });
 
   function applyInitialSlotMapping() {
@@ -1695,11 +2298,8 @@ window.addEventListener('DOMContentLoaded', () => {
   }
 
   async function startNewSession(pId, options = {}) {
-    const songId = 'stem-full';
-
     try {
-      const payloadBody = { participantId: pId, songId };
-      if (options.assignedSeat) payloadBody.assignedSeat = options.assignedSeat;
+      const payloadBody = { participantId: pId };
       if (options.emailHash) payloadBody.emailHash = options.emailHash;
       const res = await fetch('/api/start-session', {
         method: 'POST',
@@ -1712,11 +2312,6 @@ window.addEventListener('DOMContentLoaded', () => {
         payload = await res.json();
       } catch (_) {
         payload = {};
-      }
-
-      if (res.status === 409) {
-        const error = payload?.error || 'Seat already taken';
-        throw Object.assign(new Error(error), { code: 'seat-taken' });
       }
 
       if (!res.ok || !payload?.sessionId) {
@@ -1739,6 +2334,35 @@ window.addEventListener('DOMContentLoaded', () => {
       console.error('Error starting new session:', error);
       throw error;
     }
+  }
+
+  async function ensureSessionStarted() {
+    if (sessionId) return true;
+    if (sessionStartPromise) return sessionStartPromise;
+    if (!participantId) {
+      alert('Participant information missing. Please reload the page through the Qualtrics link.');
+      return false;
+    }
+    const opts = sessionStartOptions ? { ...sessionStartOptions } : {};
+    sessionStartPromise = startNewSession(participantId, opts)
+      .then(() => {
+        sessionStartPromise = null;
+        return true;
+      })
+      .catch((error) => {
+        sessionStartPromise = null;
+        console.error('Deferred session start failed:', error);
+        const message = String(error?.message || '');
+        if (/participant already has an active session/i.test(message)) {
+          sessionStartOptions = null;
+          showQualtricsRedirect('Records show this email has already tested. Please return to Qualtrics and use a new survey link.');
+        } else {
+          sessionStartOptions = null;
+          alert('Failed to start the session. Please try again.');
+        }
+        return false;
+      });
+    return sessionStartPromise;
   }
 
   async function finalizeSession(action = 'complete') {
@@ -1805,211 +2429,26 @@ window.addEventListener('DOMContentLoaded', () => {
       }
       sessionId = null;
       participantId = null;
-      assignedSeatId = null;
-      window._assignedSeatId = null;
+      sessionStartOptions = null;
+      sessionStartPromise = null;
       resetSessionStats();
       sessionFinalized = false;
     } catch (error) {
       console.error('Failed to finalize session', error);
       sessionFinalized = false;
+      sessionStartPromise = null;
     }
   }
-
-  function renderSeatGrid(overlay, usedSeats) {
-    let gridHtml = '<h1>Select Your Seat</h1><p>Each seat corresponds to a unique participant ID.</p><div id="seat-grid">';
-    for (let i = 1; i <= 40; i++) {
-      const seatId = `S${i.toString().padStart(2, '0')}`;
-      const isUsed = usedSeats.includes(seatId);
-      gridHtml += `<div class="seat-box ${isUsed ? 'used' : 'available'}" data-seat-id="${seatId}">${seatId}</div>`;
-    }
-    gridHtml += '</div>';
-    overlay.innerHTML = gridHtml;
-
-    const availableSeats = overlay.querySelectorAll('.seat-box.available');
-    availableSeats.forEach(seat => {
-      seat.addEventListener('click', async () => {
-        if (seat.dataset.state === 'busy') return;
-        seat.dataset.state = 'busy';
-        participantId = seat.getAttribute('data-seat-id');
-        console.log(`Seat selected: ${participantId}`);
-
-        try {
-          await startNewSession(participantId);
-          applyInitialSlotMapping();
-        } catch (error) {
-          participantId = null;
-          seat.dataset.state = 'idle';
-          alert('Failed to start session. Please try again.');
-          console.warn('Failed to start session from compact selector:', error);
-          return;
-        }
-
-        overlay.style.opacity = '0';
-        setTimeout(() => {
-          if (overlay.parentNode) {
-            overlay.parentNode.removeChild(overlay);
-          }
-           // Show tour bubble
-          const tourBubble = document.getElementById('tour-bubble');
-          if (tourBubble) tourBubble.classList.add('visible');
-          const hueB = document.getElementById('hue-bubble');
-          setTimeout(()=>{ if (hueB) hueB.classList.add('visible'); }, 1200);
-        }, 300);
-      });
-    });
-  }
-
-  async function autoAssignSeat(params) {
-    const { userID, email } = params || {};
-    if (!userID) throw new Error('Missing Qualtrics userID');
-
-    try {
-      console.log('[Qualtrics] autoAssignSeat start for userID:', userID);
-      const res = await fetch('/api/get-used-seats');
-      if (!res.ok) throw new Error(`API responded with ${res.status}`);
-      const payload = await res.json();
-      const used = Array.isArray(payload)
-        ? payload
-        : Array.isArray(payload?.seats)
-          ? payload.seats
-          : [];
-
-      let chosenSeat = null;
-      for (let i = 1; i <= 100; i++) {
-        const seatId = `seat-${i}`;
-        if (!used.includes(seatId)) {
-          chosenSeat = seatId;
-          break;
-        }
-      }
-
-      if (!chosenSeat) {
-        throw new Error('No available seat for auto-assignment');
-      }
-
-      const emailHash = email ? await hashEmail(email) : null;
-      assignedSeatId = chosenSeat;
-      window._assignedSeatId = assignedSeatId;
-      participantId = userID;
-
-      const options = { assignedSeat: chosenSeat };
-      if (emailHash) options.emailHash = emailHash;
-
-      await startNewSession(userID, options);
-      console.log('[Qualtrics] Auto-assigned seat to participant:', { userID, seat: chosenSeat, emailHash });
-
-      applyInitialSlotMapping();
-      return { seatId: chosenSeat, emailHash };
-    } catch (error) {
-      console.error('[Qualtrics] autoAssignSeat error:', error);
-      participantId = null;
-      assignedSeatId = null;
-      throw error;
-    }
-  }
-
-  // Seat selection overlay (100 seats: seat-1 ... seat-100) with fetch + fallback
-  function setupSeatSelection() {
-    const overlay = document.createElement('div');
-    overlay.id = 'seat-overlay';
-    overlay.innerHTML = `
-      <h1>Please select a seat</h1>
-      <p>Select a white square to begin the experiment. Red squares are already taken.</p>
-      <div id="seat-grid"></div>
-    `;
-    document.body.appendChild(overlay);
-    const grid = document.getElementById('seat-grid');
-
-    fetch('/api/get-used-seats')
-      .then(res => {
-        if (!res.ok) throw new Error(`API responded with ${res.status}`);
-        return res.json();
-      })
-      .then((payload) => {
-        const used = Array.isArray(payload)
-          ? payload
-          : Array.isArray(payload?.seats)
-            ? payload.seats
-            : [];
-        const degraded = Array.isArray(payload) ? false : !!payload?.degraded;
-        if (degraded) {
-          const notice = document.createElement('p');
-          notice.style.color = '#f5b942';
-          notice.style.marginBottom = '18px';
-          notice.textContent = 'Seat locking is running in offline mode. Seats may collide.';
-          overlay.insertBefore(notice, grid);
-        }
-        for (let i = 1; i <= 100; i++) {
-          const seatId = `seat-${i}`;
-          const seat = document.createElement('div');
-          seat.className = 'seat-box';
-          seat.textContent = i;
-          seat.dataset.id = seatId;
-          if (used.includes(seatId)) {
-            seat.classList.add('used');
-          } else {
-          seat.classList.add('available');
-          seat.onclick = async () => {
-            if (seat.dataset.state === 'busy' || seat.classList.contains('used')) return;
-            seat.dataset.state = 'busy';
-            participantId = seatId;
-            seat.classList.add('pending');
-            try {
-              await startNewSession(participantId);
-              console.log(`Seat selected: ${participantId}`);
-              applyInitialSlotMapping();
-
-              overlay.style.opacity = '0';
-              setTimeout(() => {
-                if (overlay.parentNode) overlay.parentNode.removeChild(overlay);
-                const tourBubbleEl = document.getElementById('tour-bubble');
-                if (tourBubbleEl) tourBubbleEl.classList.add('visible');
-                const hueB = document.getElementById('hue-bubble');
-                setTimeout(()=>{ if (hueB) hueB.classList.add('visible'); }, 1200);
-              }, 300);
-            } catch (error) {
-              participantId = null;
-              if (error.code === 'seat-taken') {
-                seat.classList.remove('available');
-                seat.classList.add('used');
-                seat.setAttribute('title', 'Seat already taken');
-                alert('Seat already taken. Please choose another seat.');
-              } else {
-                alert('Failed to start session. Please try again.');
-                console.warn('Failed to start session:', error);
-              }
-            } finally {
-              seat.dataset.state = 'idle';
-              seat.classList.remove('pending');
-            }
-          };
-          }
-          grid.appendChild(seat);
-        }
-      })
-      .catch(err => {
-        console.error('Could not fetch used seats.', err);
-        grid.innerHTML = `<p style="color:#e55073;">Could not load seat information. You can continue locally.</p>`;
-        const row = document.createElement('div');
-        row.className = 'row';
-        const retry = document.createElement('button');
-        retry.className = 'btn'; retry.textContent = 'Retry';
-        retry.onclick = ()=>{ if (overlay.parentNode) overlay.parentNode.removeChild(overlay); setupSeatSelection(); };
-        const cont = document.createElement('button');
-        cont.className = 'btn primary'; cont.textContent = 'Continue (local)';
-        cont.onclick = ()=>{ participantId = 'local-'+Date.now(); if (overlay.parentNode) overlay.parentNode.removeChild(overlay); const tourBubbleEl = document.getElementById('tour-bubble'); if (tourBubbleEl) tourBubbleEl.classList.add('visible'); };
-        row.appendChild(retry); row.appendChild(cont); overlay.appendChild(row);
-      });
-  }
-
   function setupWelcomeScreen() {
     const isAuto = QUALTRICS_PARAMS && QUALTRICS_PARAMS.hasParams;
     console.log('[Qualtrics] setupWelcomeScreen mode ->', isAuto ? 'auto' : 'manual');
 
-    if (!isAuto) {
+    if (!isAuto || !QUALTRICS_PARAMS.userID) {
       showQualtricsRedirect('This experiment is accessible only after completing the Qualtrics intake survey.');
       return;
     }
+
+    participantId = QUALTRICS_PARAMS.userID;
 
     const overlay = document.createElement('div');
     overlay.id = 'welcome-overlay';
@@ -2017,7 +2456,9 @@ window.addEventListener('DOMContentLoaded', () => {
       <div class="welcome-content">
         <h1 class="welcome-title">Welcome</h1>
         <p class="welcome-text">Thank you for completing the Qualtrics survey.</p>
-        <p class="welcome-text">Press <strong>Enter</strong> to begin detecting mapping changes. Please wear headphones for the best experience.</p>
+        <p class="welcome-text">You will experience a combined audiovisual content.</p>
+        <p class="welcome-text">Press <strong>Enter</strong> to begin detecting mapping changes.</p>
+        <p class="welcome-text">(Headphones recommended for best experience)</p>
         <button class="welcome-button">Enter</button>
       </div>
     `;
@@ -2027,40 +2468,46 @@ window.addEventListener('DOMContentLoaded', () => {
     const button = overlay.querySelector('.welcome-button');
     if (!button) return;
 
-    const handleAuto = async () => {
+    const handleProceed = async () => {
         if (button.disabled) return;
         button.disabled = true;
         button.classList.add('disabled');
-        console.log('[Qualtrics] Auto mode: Enter pressed, starting auto assignment');
+        console.log('[Qualtrics] Proceed pressed for userID:', participantId);
         try {
-          await autoAssignSeat(QUALTRICS_PARAMS);
-          console.log('[Qualtrics] Auto assignment success, fading welcome overlay');
+          if (!sessionStartOptions) {
+            sessionStartOptions = {};
+            const email = QUALTRICS_PARAMS.email;
+            if (email) {
+              try {
+                sessionStartOptions.emailHash = await hashEmail(email);
+              } catch (err) {
+                console.warn('Failed to hash email for session start', err);
+                delete sessionStartOptions.emailHash;
+              }
+            }
+          }
+          applyInitialSlotMapping();
           overlay.classList.add('hidden');
           setTimeout(() => {
             if (overlay.parentNode) overlay.parentNode.removeChild(overlay);
-            const tourBubbleEl = document.getElementById('tour-bubble');
-            if (tourBubbleEl) tourBubbleEl.classList.add('visible');
-            const hueBubbleEl = document.getElementById('hue-bubble');
-            setTimeout(() => { if (hueBubbleEl) hueBubbleEl.classList.add('visible'); }, 1200);
+            showModeCompareOverlay(showGuidedBubbles);
           }, 400);
         } catch (error) {
-          console.error('[Qualtrics] Automatic session start failed', error);
-          const msg = (error && /participant already has an active session/i.test(String(error.message || '')))
-            ? 'Records show this email has already tested. Please return to Qualtrics and use a new survey link.'
-            : 'Automatic start failed. Please return to Qualtrics to request a new survey link.';
+          console.error('[Qualtrics] Welcome proceed failed', error);
+          sessionStartOptions = null;
           overlay.classList.add('hidden');
           setTimeout(() => {
             if (overlay.parentNode) overlay.parentNode.removeChild(overlay);
-            showQualtricsRedirect(msg);
+            showQualtricsRedirect('Unable to initialize the experience. Please refresh the page and try again.');
           }, 400);
         }
       };
-    button.addEventListener('click', handleAuto);
+    button.addEventListener('click', handleProceed);
     overlay.addEventListener('keydown', (e) => {
       if (e.key === 'Enter') {
         e.preventDefault();
         console.log('[Qualtrics] Enter key captured on welcome overlay');
-        handleAuto();
+        handleProceed();
       }
     });
     // focus button for immediate Enter capture

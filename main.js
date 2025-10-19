@@ -48,6 +48,8 @@ let markerPulse = null; // { start: millis(), duration: 900 }
 const SPACE_COOLDOWN_MS = 1000;
 let spaceHoldActive = false;
 let lastSpaceReleaseTime = 0;
+let allowSpaceTesting = true;
+let countdownActive = false;
 
 
 let auroraColors = [];
@@ -991,10 +993,10 @@ function draw() {
     } else {
       const t = elapsed / dur; // 0..1
       const ease = Math.sin(t * Math.PI); // in-out
-      // thickness anim (half of current), two-layer glow
-      const thick = 1.5 + ease * 4.5; // was 3 + ease * 9
+      // thickness anim (half of previous), two-layer glow
+      const thick = 0.75 + ease * 2.25; // half of earlier thickness
       const thickOuter = thick * 1.8;
-      const alphaBase = 40 + ease * 180;
+      const alphaBase = (40 + ease * 180) / 3;
       const hueShift = (millis() * 0.12) % 360; // animate hues ~120deg/s
 
       // draw edge gradient dots with HSB and additive blend for glow
@@ -1354,6 +1356,27 @@ window.addEventListener('DOMContentLoaded', () => {
     opacity: 1;
   }
 
+  #welcome-overlay.space-test-glow::after,
+  #mode-compare-overlay.space-test-glow::after,
+  #countdown-overlay.space-test-glow::after {
+    content: '';
+    position: absolute;
+    inset: 0;
+    border: 2px solid rgba(120,220,255,0.65);
+    box-shadow:
+      0 0 20px rgba(80,200,255,0.55),
+      0 0 45px rgba(40,140,255,0.35);
+    opacity: 0;
+    animation: overlayEdgePulse 0.45s ease-out forwards;
+    pointer-events: none;
+  }
+
+  @keyframes overlayEdgePulse {
+    0% { opacity: 0; }
+    20% { opacity: 0.9; }
+    100% { opacity: 0; }
+  }
+
   /* Feedback slider styling */
   .nicer-range { -webkit-appearance:none; appearance:none; width:80%; height:6px; background: linear-gradient(90deg,#4ecdc4,#8df1ea); border-radius: 4px; outline:none; }
   .nicer-range::-webkit-slider-thumb { -webkit-appearance:none; width:22px; height:22px; background:#fff; border:3px solid #4ecdc4; border-radius:50%; box-shadow:0 2px 8px rgba(0,0,0,0.4); cursor:pointer; }
@@ -1639,8 +1662,10 @@ window.addEventListener('DOMContentLoaded', () => {
   modeCompareOverlay.innerHTML = `
     <div class="welcome-content mode-preview">
       <h1 class="welcome-title">Mode Mapping Preview</h1>
-      <p class="welcome-text mode-line">The experiment contains two modes: <strong>Mode A</strong> (instant response) and <strong>Mode B</strong> (energy accumulation). Your experiment will start randomly from either A or B mode. The system will automatically switch between them.</p>
-      <p class="welcome-text mode-line">Please press the <strong>Spacebar</strong> when you feel the switch happening. The screen edges glow when you press.</p>
+      <p class="welcome-text mode-line">The experiment contains two modes: Mode A (instant response) and Mode B (energy accumulation).
+      The experiment will start randomly from either mode A or B, with automatic switches between.</p>
+      <p class="welcome-text mode-line">Press the Spacebar when you feel the switch happening.
+      The screen edges glow when you press (You can press now to see the effect).</p>
       <div class="mode-demo-grid">
         <div class="mode-demo-item">
           <video src="./videos/M-A.mp4" autoplay muted loop playsinline></video>
@@ -1651,7 +1676,8 @@ window.addEventListener('DOMContentLoaded', () => {
           <span class="mode-demo-label">Mode B</span>
         </div>
       </div>
-      <p class="welcome-text mode-line">When you achieve <strong>several consecutive accurate presses</strong> (very close to the switch), the <strong>colored regions may relocate</strong> smoothly. This is expected and part of the challenge — please adjust the Hue first, then focus on detecting changes.</p>
+      <p class="welcome-text mode-line">The colored regions may relocate smoothly when you achieve several consecutive accurate presses.
+      Please adjust the Hue first, then you can start detecting changes.</p>
       <button class="welcome-button" id="mode-compare-continue">Continue</button>
     </div>
   `;
@@ -1671,6 +1697,7 @@ window.addEventListener('DOMContentLoaded', () => {
       if (typeof next === 'function') next();
       return;
     }
+    allowSpaceTesting = true;
     modeCompareShown = true;
     modeCompareOverlay.classList.add('instant');
     modeCompareOverlay.classList.remove('hidden');
@@ -1961,6 +1988,8 @@ window.addEventListener('DOMContentLoaded', () => {
         featureUsage.hadCountdown = true;
         const countdownNumber = document.getElementById('countdown-number');
         countdownOverlay.classList.add('visible');
+        countdownActive = true;
+        allowSpaceTesting = true;
         let count = 3;
 
         const showNumber = (num) => {
@@ -1978,6 +2007,8 @@ window.addEventListener('DOMContentLoaded', () => {
           } else {
             clearInterval(countdownInterval);
             countdownOverlay.classList.remove('visible');
+            countdownActive = false;
+            allowSpaceTesting = false;
             audio.play();
             markPlaybackStarted();
             window._previewLights = false;
@@ -1985,6 +2016,8 @@ window.addEventListener('DOMContentLoaded', () => {
           }
         }, 1000);
       } else {
+        allowSpaceTesting = false;
+        countdownActive = false;
         audio.play();
         markPlaybackStarted();
         window._previewLights = false;
@@ -2007,7 +2040,13 @@ window.addEventListener('DOMContentLoaded', () => {
     window.audio = audio;
     audioLoaded = false;
     audio.oncanplay = () => { audioLoaded = true; setPlayIcon(); };
-    audio.onplay = () => { pauseCSV(); startModeAutoSwitch(); markPlaybackStarted(); };
+    audio.onplay = () => {
+      pauseCSV();
+      startModeAutoSwitch();
+      markPlaybackStarted();
+      allowSpaceTesting = false;
+      countdownActive = false;
+    };
     audio.onpause = () => {
       pauseCSV();
       stopModeAutoSwitch();
@@ -2147,13 +2186,37 @@ window.addEventListener('DOMContentLoaded', () => {
   }
 
   let logCount = 0;
+  function triggerSpaceTestGlow() {
+    const overlayOrder = ['mode-compare-overlay', 'countdown-overlay', 'welcome-overlay'];
+    const target = overlayOrder
+      .map(id => document.getElementById(id))
+      .find(el => {
+        if (!el) return false;
+        if (el.id === 'mode-compare-overlay' && el.classList.contains('hidden')) return false;
+        if (el.id === 'countdown-overlay' && !el.classList.contains('visible')) return false;
+        return true;
+      });
+    if (!target) return;
+    target.classList.add('space-test-glow');
+    if (target._spaceGlowTimer) clearTimeout(target._spaceGlowTimer);
+    target._spaceGlowTimer = setTimeout(() => {
+      target.classList.remove('space-test-glow');
+      target._spaceGlowTimer = null;
+    }, 500);
+  }
+
   function logAndTriggerPulse() {
     // Trigger visual pulse immediately
     markerPulse = { start: millis(), duration: 450 };
 
-    // If the session is not started or audio is not playing, do not log
+    // During testing phases, skip logging but still show the visual pulse
+    if (allowSpaceTesting || countdownActive) {
+      triggerSpaceTestGlow();
+      return;
+    }
+
+    // If the session is not ready or audio isn't playing, skip logging silently
     if (!participantId || !sessionId || !window.audio || window.audio.paused) {
-      console.warn('Log attempt failed: No participant ID, session ID, or audio not playing.');
       return;
     }
 
@@ -2251,7 +2314,8 @@ window.addEventListener('DOMContentLoaded', () => {
       e.preventDefault();
       const now = Date.now();
       if (spaceHoldActive) return;
-      if (lastSpaceReleaseTime && (now - lastSpaceReleaseTime) < SPACE_COOLDOWN_MS) return;
+      const bypassCooldown = allowSpaceTesting || countdownActive;
+      if (!bypassCooldown && lastSpaceReleaseTime && (now - lastSpaceReleaseTime) < SPACE_COOLDOWN_MS) return;
       spaceHoldActive = true;
       logAndTriggerPulse();
     }
@@ -2460,7 +2524,6 @@ window.addEventListener('DOMContentLoaded', () => {
         <h1 class="welcome-title">Welcome</h1>
         <p class="welcome-text">Thank you for completing the Qualtrics survey.</p>
         <p class="welcome-text">You will experience a combined audiovisual content.</p>
-        <p class="welcome-text">Press <strong>Enter</strong> to begin detecting mapping changes.</p>
         <p class="welcome-text">(Headphones recommended for best experience)</p>
         <button class="welcome-button">Enter</button>
       </div>

@@ -6,8 +6,9 @@ module.exports = async (request, response) => {
     return response.status(405).json({ ok: false, error: 'Method Not Allowed' });
   }
 
-  const { participantId, emailHash } = request.body || {};
+  const { participantId, emailHash, email } = request.body || {};
   const normalizedEmailHash = (typeof emailHash === 'string' && emailHash.trim().length) ? emailHash.trim() : null;
+  const normalizedEmail = (typeof email === 'string' && email.trim().length) ? email.trim() : null;
   if (!participantId) {
     return response.status(400).json({ ok: false, error: 'participantId is required' });
   }
@@ -35,13 +36,15 @@ module.exports = async (request, response) => {
         hit_count INTEGER DEFAULT 0,
         negative_hit_count INTEGER DEFAULT 0,
         valid BOOLEAN DEFAULT FALSE,
-        email_hash TEXT
+        email_hash TEXT,
+        email TEXT
       );
     `;
     await client.sql`ALTER TABLE thesis_sessions ALTER COLUMN session_id TYPE TEXT USING session_id::TEXT;`.catch(() => {});
     await client.sql`ALTER TABLE thesis_sessions ALTER COLUMN session_id SET NOT NULL;`.catch(() => {});
     await client.sql`ALTER TABLE thesis_sessions ADD CONSTRAINT thesis_sessions_participant_unique UNIQUE (participant_id);`.catch(() => {});
     await client.sql`ALTER TABLE thesis_sessions ADD COLUMN IF NOT EXISTS email_hash TEXT;`.catch(() => {});
+    await client.sql`ALTER TABLE thesis_sessions ADD COLUMN IF NOT EXISTS email TEXT;`.catch(() => {});
 
     const sessionId = randomUUID();
     await client.sql`BEGIN`;
@@ -57,7 +60,8 @@ module.exports = async (request, response) => {
         valid,
         last_event_at,
         created_at,
-        email_hash
+        email_hash,
+        email
       )
       VALUES (
         ${sessionId},
@@ -70,7 +74,8 @@ module.exports = async (request, response) => {
         FALSE,
         NOW(),
         NOW(),
-        ${normalizedEmailHash}
+        ${normalizedEmailHash},
+        ${normalizedEmail}
       )
       ON CONFLICT (participant_id) DO NOTHING
       RETURNING session_id;

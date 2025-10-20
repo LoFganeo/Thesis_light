@@ -65,7 +65,7 @@ const DEFAULT_GLOBAL_BRIGHTNESS = 2.4;
 const DEFAULT_MAPPING_A_BASE = 1.8;
 const DEFAULT_MAPPING_A_PEAK = 1.85;
 const DEFAULT_MAPPING_B_ATTACK = 0.15;
-const DEFAULT_MAPPING_B_RELEASE = 0.010;
+const DEFAULT_MAPPING_B_RELEASE = 0.10;
 const DEFAULT_MAPPING_B_MIN_BASE = 1.10;
 const DEFAULT_MAPPING_B_GAMMA = 1.00;
 const DEFAULT_SHAPE_SIGMA = 1.70;
@@ -1479,22 +1479,22 @@ window.addEventListener('DOMContentLoaded', () => {
     <div class="slider-row">
       <span class="slider-label">A Base</span>
       <input type="range" id="a-base-slider" min="0" max="300" step="1">
-      <span id="a-base-value" class="badge">170%</span>
+      <span id="a-base-value" class="badge">180%</span>
     </div>
     <div class="slider-row">
       <span class="slider-label">A Peak</span>
       <input type="range" id="a-peak-slider" min="0" max="300" step="1">
-      <span id="a-peak-value" class="badge">195%</span>
+      <span id="a-peak-value" class="badge">185%</span>
     </div>
     <div class="slider-row" style="margin-top:18px;">
       <span class="slider-label">Shape σ</span>
       <input type="range" id="shape-sigma-slider" min="0" max="200" step="1">
-      <span id="shape-sigma-value" class="badge">115%</span>
+      <span id="shape-sigma-value" class="badge">170%</span>
     </div>
     <div class="slider-row">
       <span class="slider-label">Shape Bias</span>
       <input type="range" id="shape-bias-slider" min="0" max="300" step="1">
-      <span id="shape-bias-value" class="badge">150%</span>
+      <span id="shape-bias-value" class="badge">156%</span>
     </div>
     <div class="slider-row" style="margin-top:18px;">
       <span class="slider-label">B Attack</span>
@@ -1504,17 +1504,17 @@ window.addEventListener('DOMContentLoaded', () => {
     <div class="slider-row">
       <span class="slider-label">B Release</span>
       <input type="range" id="b-release-slider" min="0" max="200" step="1">
-      <span id="b-release-value" class="badge">10‰</span>
+      <span id="b-release-value" class="badge">10%</span>
     </div>
     <div class="slider-row">
       <span class="slider-label">B Floor</span>
       <input type="range" id="b-floor-slider" min="0" max="200" step="1">
-      <span id="b-floor-value" class="badge">90%</span>
+      <span id="b-floor-value" class="badge">110%</span>
     </div>
     <div class="slider-row">
       <span class="slider-label">B Gamma</span>
       <input type="range" id="b-gamma-slider" min="0" max="300" step="1">
-      <span id="b-gamma-value" class="badge">110%</span>
+      <span id="b-gamma-value" class="badge">100%</span>
     </div>
   `;
   document.body.appendChild(mappingPanel);
@@ -1600,13 +1600,13 @@ window.addEventListener('DOMContentLoaded', () => {
   const bReleaseSlider = document.getElementById('b-release-slider');
   const bReleaseValue = document.getElementById('b-release-value');
   if (bReleaseSlider && bReleaseValue) {
-    const init = Math.round(mappingBAdjust.release * 1000);
+    const init = Math.round(mappingBAdjust.release * 100);
     bReleaseSlider.value = String(init);
-    bReleaseValue.textContent = `${init}‰`;
+    bReleaseValue.textContent = `${init}%`;
     bReleaseSlider.addEventListener('input', (event) => {
       const val = Math.max(0, Math.min(200, parseInt(event.target.value, 10) || init));
-      mappingBAdjust.release = val / 1000;
-      bReleaseValue.textContent = `${val}‰`;
+      mappingBAdjust.release = val / 100;
+      bReleaseValue.textContent = `${val}%`;
     });
   }
 
@@ -2368,6 +2368,7 @@ window.addEventListener('DOMContentLoaded', () => {
     try {
       const payloadBody = { participantId: pId };
       if (options.emailHash) payloadBody.emailHash = options.emailHash;
+      if (options.email) payloadBody.email = options.email;
       const res = await fetch('/api/start-session', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
@@ -2544,8 +2545,12 @@ window.addEventListener('DOMContentLoaded', () => {
             sessionStartOptions = {};
             const email = QUALTRICS_PARAMS.email;
             if (email) {
+              const trimmed = email.trim();
+              if (trimmed.length) {
+                sessionStartOptions.email = trimmed;
+              }
               try {
-                sessionStartOptions.emailHash = await hashEmail(email);
+                sessionStartOptions.emailHash = await hashEmail(trimmed);
               } catch (err) {
                 console.warn('Failed to hash email for session start', err);
                 delete sessionStartOptions.emailHash;

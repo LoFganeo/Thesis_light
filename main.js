@@ -72,15 +72,19 @@ let showRing = true;
 let showUI = true;
 
 // === Real-time adjustment baseline ===
-const DEFAULT_GLOBAL_BRIGHTNESS = 2.4;
-const DEFAULT_MAPPING_A_BASE = 1.8;
-const DEFAULT_MAPPING_A_PEAK = 1.85;
+const DEFAULT_GLOBAL_BRIGHTNESS = 2.6;
+const DEFAULT_MAPPING_A_BASE = 1.5;
+const DEFAULT_MAPPING_A_PEAK = 1.7;
+const DEFAULT_MAPPING_A_NORM_PERCENTILE = 20; // 10th/90th percentile (20 means 20%-80%)
+const DEFAULT_MAPPING_A_NORM_LIMIT = 100; // Max normalized value in percentage (100 = 1.0x)
+const DEFAULT_MAPPING_A_CLIP_STRENGTH = 80; // Smooth clip strength in percentage (80 = 0.8)
+const DEFAULT_MAPPING_A_NORM_STRENGTH = 10; // Hybrid blend: 0=raw, 100=full normalization (10 = 10%)
 const DEFAULT_MAPPING_B_ATTACK = 0.15;
 const DEFAULT_MAPPING_B_RELEASE = 0.10;
 const DEFAULT_MAPPING_B_MIN_BASE = 1.10;
 const DEFAULT_MAPPING_B_GAMMA = 1.00;
-const DEFAULT_SHAPE_SIGMA = 1.70;
-const DEFAULT_SHAPE_BIAS = 1.56;
+const DEFAULT_SHAPE_SIGMA = 0.90;
+const DEFAULT_SHAPE_BIAS = 1.16;
 const MODE_B_LOOKAHEAD_SEC = 0.25;
 const MODE_B_LOOKAHEAD_DECAY = 0.9;
 const MODE_B_FAST_FLOOR_BLEND = 0.3;
@@ -93,10 +97,30 @@ const MODE_B_PEAK_THRESHOLD = 0.12;
 const MODE_B_PEAK_STD_MULT = 0.8;
 const MODE_B_BASELINE_STD_FALLOFF = 0.5;
 
+// === Dynamic Decay Rate Calculation Parameters (V2) ===
+const DECAY_CALC_PARAMS = {
+  // Standard deviation multiplier for peak detection threshold
+  thresholdStdDevMultiplier: 0.8,
+  // Minimum number of peaks required for dynamic calculation (fallback to defaults if less)
+  minPeakCount: 8,
+  // Minimum frames between peaks to filter noise (0.15 sec * 60fps ≈ 9 frames)
+  minPeakIntervalFrames: 9,
+  // Event rate input range in Hz (events per second)
+  eventRateRange: [1, 10],
+  // Slow decay rate output range (for high-energy sustained states)
+  slowDecayRange: [0.98, 0.94],
+  // Fast decay rate output range (for low-energy/transient states)
+  fastDecayRange: [0.94, 0.88]
+};
+
 let modeBBaselineFrames = [MODE_B_BASELINE_DEFAULT_FRAMES, MODE_B_BASELINE_DEFAULT_FRAMES, MODE_B_BASELINE_DEFAULT_FRAMES, MODE_B_BASELINE_DEFAULT_FRAMES, MODE_B_BASELINE_DEFAULT_FRAMES];
 let modeBPeakThresholds = [MODE_B_PEAK_THRESHOLD, MODE_B_PEAK_THRESHOLD, MODE_B_PEAK_THRESHOLD, MODE_B_PEAK_THRESHOLD, MODE_B_PEAK_THRESHOLD];
 let modeBNextPeakFrames = null;
 let modeBPrevPeakFrames = null;
+// Dynamic decay rates calculated per band (V2)
+let perBandDecayRates = [];
+// Per-band energy normalization for Mode A
+let perBandNormalizationA = [];
 
 const globalAdjust = {
   brightnessScale: DEFAULT_GLOBAL_BRIGHTNESS
@@ -104,7 +128,11 @@ const globalAdjust = {
 
 const mappingAAdjust = {
   baseScale: DEFAULT_MAPPING_A_BASE,
-  peakScale: DEFAULT_MAPPING_A_PEAK
+  peakScale: DEFAULT_MAPPING_A_PEAK,
+  normPercentile: DEFAULT_MAPPING_A_NORM_PERCENTILE,
+  normLimit: DEFAULT_MAPPING_A_NORM_LIMIT,
+  clipStrength: DEFAULT_MAPPING_A_CLIP_STRENGTH,
+  normStrength: DEFAULT_MAPPING_A_NORM_STRENGTH
 };
 
 const mappingBAdjust = {
@@ -120,7 +148,7 @@ const shapeAdjust = {
 };
 
 const VALIDATION_THRESHOLDS = {
-  minPlaybackSeconds: 30,
+  minPlaybackSeconds: 60,
   minKeypressCount: 5,
   minHitCount: 2,
   reminderPlaybackSeconds: 20
@@ -352,6 +380,190 @@ function hslToRgb(h, s, l) {
   return [Math.round(r*255), Math.round(g*255), Math.round(b*255)];
 }
 
+/**
+ * Calculate per-band energy normalization parameters for Mode A
+ *
+ * @param {Array<Array<number>>} energyData - 2D array of energy values [frame][band]
+ * @param {number} percentile - Percentile value (e.g., 10 means 10th-90th percentile)
+ * @returns {Array<Object>} Array of 5 objects: { minEnergy, maxEnergy, range }
+ */
+function calculatePerBandNormalization(energyData, percentile = 10) {
+  const results = [];
+
+  for (let bandIndex = 0; bandIndex < 5; bandIndex++) {
+    // Extract energy values for this band
+    const bandEnergies = energyData.map(row => {
+      const val = row[bandIndex];
+      return (typeof val === 'number' && isFinite(val)) ? Math.max(val, 0) : 0;
+    });
+
+    if (bandEnergies.length === 0) {
+      // Fallback for empty data
+      results.push({
+        minEnergy: 0,
+        maxEnergy: 1,
+        range: 1
+      });
+      continue;
+    }
+
+    // Sort to find percentiles
+    const sorted = [...bandEnergies].sort((a, b) => a - b);
+
+    // Use adjustable percentiles to avoid outliers
+    const pLow = Math.max(0, Math.min(50, percentile)) / 100; // Clamp to 0-50%
+    const pHigh = 1 - pLow;
+    const pLowIndex = Math.floor(sorted.length * pLow);
+    const pHighIndex = Math.floor(sorted.length * pHigh);
+    const minEnergy = sorted[pLowIndex];
+    const maxEnergy = sorted[pHighIndex];
+    const range = Math.max(maxEnergy - minEnergy, 0.01); // Avoid division by zero
+
+    results.push({
+      minEnergy: minEnergy,
+      maxEnergy: maxEnergy,
+      range: range
+    });
+  }
+
+  return results;
+}
+
+/**
+ * Smooth clipping function using tanh for gradual compression
+ *
+ * @param {number} value - Input value
+ * @param {number} pivot - Threshold above which compression starts
+ * @param {number} strength - Compression strength (lower = more compression)
+ * @returns {number} Compressed value
+ */
+function smoothClip(value, pivot, strength = 0.5) {
+  if (value <= pivot) return value;
+
+  const excess = value - pivot;
+  const compressed = Math.tanh(excess / strength) * 0.4;
+  return pivot + compressed;
+}
+
+/**
+ * Calculate dynamic decay rates for each frequency band based on music analysis (V2)
+ *
+ * @param {Array<Array<number>>} energyData - 2D array of energy values [frame][band]
+ * @param {number} csvFps - Frame rate of the energy data (e.g., 60)
+ * @param {Object} params - Configuration parameters (DECAY_CALC_PARAMS)
+ * @returns {Array<Object>} Array of 5 objects: { slowDecay, fastDecay, medianEnergy, eventRateHz, peakCount }
+ */
+function calculatePerBandDecayRates_V2(energyData, csvFps, params) {
+  const results = [];
+  const decayBase = [0.94, 0.88, 0.88, 0.88, 0.94]; // Default decay rates from existing code
+
+  // Linear mapping helper function
+  const mapValue = (value, inMin, inMax, outMin, outMax) => {
+    const clamped = Math.max(inMin, Math.min(inMax, value));
+    return outMin + (clamped - inMin) * (outMax - outMin) / (inMax - inMin);
+  };
+
+  // Process each of the 5 frequency bands
+  for (let bandIndex = 0; bandIndex < 5; bandIndex++) {
+    // 1. Extract energy values for this band
+    const bandEnergies = energyData.map(row => {
+      const val = row[bandIndex];
+      return (typeof val === 'number' && isFinite(val)) ? Math.max(val, 0) : 0;
+    });
+
+    if (bandEnergies.length === 0) {
+      // Fallback for empty data
+      results.push({
+        slowDecay: decayBase[bandIndex],
+        fastDecay: decayBase[bandIndex],
+        medianEnergy: 0.1,
+        eventRateHz: 0,
+        peakCount: 0
+      });
+      continue;
+    }
+
+    // 2. Calculate statistics: mean, standard deviation, and median
+    const mean = bandEnergies.reduce((sum, v) => sum + v, 0) / bandEnergies.length;
+    const variance = bandEnergies.reduce((sum, v) => sum + Math.pow(v - mean, 2), 0) / bandEnergies.length;
+    const stdDev = Math.sqrt(variance);
+
+    // Calculate median
+    const sorted = [...bandEnergies].sort((a, b) => a - b);
+    const medianEnergy = sorted[Math.floor(sorted.length / 2)];
+
+    // 3. Calculate dynamic peak threshold
+    const peakThreshold = mean + params.thresholdStdDevMultiplier * stdDev;
+
+    // 4. Improved peak detection with minimum interval constraint
+    const peakIndices = [];
+    let lastPeakIndex = -params.minPeakIntervalFrames; // Initialize to allow first peak
+
+    for (let i = 1; i < bandEnergies.length - 1; i++) {
+      const current = bandEnergies[i];
+      const prev = bandEnergies[i - 1];
+      const next = bandEnergies[i + 1];
+
+      // Check all conditions for a peak:
+      // 1. Above threshold
+      // 2. Higher than previous point
+      // 3. Higher than or equal to next point
+      // 4. Sufficient distance from last peak
+      if (current > peakThreshold &&
+          current > prev &&
+          current >= next &&
+          (i - lastPeakIndex) >= params.minPeakIntervalFrames) {
+        peakIndices.push(i);
+        lastPeakIndex = i;
+      }
+    }
+
+    // 5. Check if we have enough peaks for reliable calculation
+    if (peakIndices.length < params.minPeakCount) {
+      // Insufficient peaks - use default decay rates
+      results.push({
+        slowDecay: decayBase[bandIndex],
+        fastDecay: decayBase[bandIndex] * 0.94, // Slightly faster for fast decay
+        medianEnergy: medianEnergy,
+        eventRateHz: 0,
+        peakCount: peakIndices.length
+      });
+      continue;
+    }
+
+    // 6. Calculate event rate (events per second)
+    // Compute intervals between consecutive peaks
+    const intervals = [];
+    for (let i = 1; i < peakIndices.length; i++) {
+      intervals.push(peakIndices[i] - peakIndices[i - 1]);
+    }
+
+    // Find median interval
+    intervals.sort((a, b) => a - b);
+    const medianIntervalFrames = intervals[Math.floor(intervals.length / 2)];
+    const eventRateHz = csvFps / medianIntervalFrames;
+
+    // 7. Map event rate to decay rates
+    const [eventMin, eventMax] = params.eventRateRange;
+    const [slowMin, slowMax] = params.slowDecayRange;
+    const [fastMin, fastMax] = params.fastDecayRange;
+
+    const slowDecay = mapValue(eventRateHz, eventMin, eventMax, slowMin, slowMax);
+    const fastDecay = mapValue(eventRateHz, eventMin, eventMax, fastMin, fastMax);
+
+    // 8. Store results for this band
+    results.push({
+      slowDecay: slowDecay,
+      fastDecay: fastDecay,
+      medianEnergy: medianEnergy,
+      eventRateHz: eventRateHz,
+      peakCount: peakIndices.length
+    });
+  }
+
+  return results;
+}
+
 // === CSV energy data ===
 let energyData = [];
 let energyFrame = 0;
@@ -391,6 +603,14 @@ function preload() {
           energyFrame = 0;
           try{ computeGlobalSaliency(); }catch(e){ console.warn('Saliency compute failed', e); }
           try{ computeModeBPeakBaselines(); }catch(e){ console.warn('ModeB baseline compute failed', e); }
+          try{
+            perBandNormalizationA = calculatePerBandNormalization(energyData, mappingAAdjust.normPercentile);
+            console.log('[Mode A] Calculated per-band normalization:', perBandNormalizationA);
+          }catch(e){ console.warn('Mode A normalization calculation failed', e); }
+          try{
+            perBandDecayRates = calculatePerBandDecayRates_V2(energyData, csvFps, DECAY_CALC_PARAMS);
+            console.log('[Decay V2] Calculated dynamic decay rates:', perBandDecayRates);
+          }catch(e){ console.warn('Dynamic decay rate calculation failed', e); }
         } catch (err) {
           console.warn('Failed processing CSV results:', err);
           energyLoaded = false;
@@ -588,14 +808,37 @@ function draw() {
     if (mappingMode === 'A') {
       const baseFactor = Math.max(0, mappingAAdjust.baseScale);
       const peakFactor = Math.max(0, mappingAAdjust.peakScale);
+      const normLimitMax = Math.max(0.1, mappingAAdjust.normLimit / 100); // Convert percentage to decimal
+      const clipStrength = Math.max(0.1, mappingAAdjust.clipStrength / 100); // Convert percentage to decimal
+      const normStrength = Math.max(0, Math.min(100, mappingAAdjust.normStrength)) / 100; // 0-1 range
+
       for (let i = 0; i < 5; i++) {
         const raw = (typeof row[i] === 'number' && isFinite(row[i])) ? Math.max(row[i], 0) : MAPPING_A_BASE_LEVEL;
         const baseVal = MAPPING_A_BASE_LEVEL * baseFactor;
-        const delta = Math.max(raw - MAPPING_A_BASE_LEVEL, 0);
-        let scaled = baseVal + delta * MAPPING_A_PEAK_SCALE * peakFactor;
-        if (scaled > MAPPING_A_CLIP_PIVOT) {
-          scaled = MAPPING_A_CLIP_PIVOT + (scaled - MAPPING_A_CLIP_PIVOT) * MAPPING_A_CLIP_RATIO;
+
+        // === Hybrid Blending: Calculate both raw and normalized paths ===
+
+        // Path 1: Raw mapping (original V1.3 logic)
+        const deltaRaw = Math.max(0, raw - MAPPING_A_BASE_LEVEL);
+        const rawScaled = baseVal + deltaRaw * MAPPING_A_PEAK_SCALE * peakFactor;
+
+        // Path 2: Normalized mapping (V1.4 logic)
+        let normalized = raw;
+        if (perBandNormalizationA && perBandNormalizationA[i]) {
+          const { minEnergy, range } = perBandNormalizationA[i];
+          normalized = (raw - minEnergy) / range;
+          normalized = Math.max(0, Math.min(normLimitMax, normalized));
         }
+        const normalizedScaled = baseVal + normalized * MAPPING_A_PEAK_SCALE * peakFactor;
+
+        // Blend between raw and normalized based on normStrength
+        let scaled = rawScaled * (1 - normStrength) + normalizedScaled * normStrength;
+
+        // Smooth clipping (applies to final blended result)
+        if (scaled > MAPPING_A_CLIP_PIVOT) {
+          scaled = smoothClip(scaled, MAPPING_A_CLIP_PIVOT, clipStrength);
+        }
+
         bands[i] = scaled;
         shapeBands[i] = scaled;
       }
@@ -675,8 +918,33 @@ function draw() {
         let boostFactor = boostRateArr[i] * (0.5 + 0.5 * diffRatio);
         if (i === 3) boostFactor = boostFactor * (0.7 + 0.3 * diffRatio);
 
-        let decayFactor = decayArr[i] - closeness * 0.08;
-        decayFactor = Math.max(MODE_B_DECAY_FLOOR, Math.min(decayFactor, 0.995));
+        // === V2 Hybrid Decay Logic ===
+        let decayFactor;
+        const bandParams = perBandDecayRates[i];
+
+        // Check if we have valid dynamic parameters for this band
+        if (bandParams && bandParams.peakCount >= DECAY_CALC_PARAMS.minPeakCount) {
+          // --- Macro layer: baseline decay based on current energy state ---
+          const baselineDecay = (bandAccum[i] > bandParams.medianEnergy)
+            ? bandParams.slowDecay
+            : bandParams.fastDecay;
+
+          // --- Micro layer: real-time adjustment based on energy smoothness ---
+          const microAdjustment = closeness * 0.08;
+
+          // --- Combine baseline with micro-adjustment ---
+          let finalDecayFactor = baselineDecay - microAdjustment;
+
+          // --- Apply release slider adjustment ---
+          finalDecayFactor = 1 - (1 - finalDecayFactor) * releaseRatio;
+
+          // --- Safety clamp ---
+          decayFactor = Math.max(MODE_B_DECAY_FLOOR, Math.min(finalDecayFactor, 0.995));
+        } else {
+          // Fallback to original logic if dynamic calculation unavailable
+          decayFactor = decayArr[i] - closeness * 0.08;
+          decayFactor = Math.max(MODE_B_DECAY_FLOOR, Math.min(decayFactor, 0.995));
+        }
 
         let extraBoost = (brightnessTarget - bandAccum[i]) * boostFactor;
         bandAccum[i] = bandAccum[i] * decayFactor + brightnessTarget * (1 - decayFactor) + extraBoost;
@@ -1525,27 +1793,47 @@ window.addEventListener('DOMContentLoaded', () => {
     <div class="slider-row">
       <span class="slider-label">Global</span>
       <input type="range" id="global-slider" min="0" max="300" step="1">
-      <span id="global-value" class="badge">240%</span>
+      <span id="global-value" class="badge">260%</span>
     </div>
     <div class="slider-row">
       <span class="slider-label">A Base</span>
       <input type="range" id="a-base-slider" min="0" max="300" step="1">
-      <span id="a-base-value" class="badge">180%</span>
+      <span id="a-base-value" class="badge">150%</span>
     </div>
     <div class="slider-row">
       <span class="slider-label">A Peak</span>
       <input type="range" id="a-peak-slider" min="0" max="300" step="1">
-      <span id="a-peak-value" class="badge">185%</span>
+      <span id="a-peak-value" class="badge">170%</span>
+    </div>
+    <div class="slider-row">
+      <span class="slider-label">A Percentile</span>
+      <input type="range" id="a-percentile-slider" min="0" max="50" step="1">
+      <span id="a-percentile-value" class="badge">20</span>
+    </div>
+    <div class="slider-row">
+      <span class="slider-label">A NormLimit</span>
+      <input type="range" id="a-norm-limit-slider" min="50" max="300" step="5">
+      <span id="a-norm-limit-value" class="badge">100%</span>
+    </div>
+    <div class="slider-row">
+      <span class="slider-label">A ClipStr</span>
+      <input type="range" id="a-clip-str-slider" min="10" max="150" step="5">
+      <span id="a-clip-str-value" class="badge">80%</span>
+    </div>
+    <div class="slider-row">
+      <span class="slider-label">A NormStr</span>
+      <input type="range" id="a-norm-str-slider" min="0" max="100" step="5">
+      <span id="a-norm-str-value" class="badge">10%</span>
     </div>
     <div class="slider-row" style="margin-top:18px;">
       <span class="slider-label">Shape σ</span>
       <input type="range" id="shape-sigma-slider" min="0" max="200" step="1">
-      <span id="shape-sigma-value" class="badge">170%</span>
+      <span id="shape-sigma-value" class="badge">90%</span>
     </div>
     <div class="slider-row">
       <span class="slider-label">Shape Bias</span>
       <input type="range" id="shape-bias-slider" min="0" max="300" step="1">
-      <span id="shape-bias-value" class="badge">156%</span>
+      <span id="shape-bias-value" class="badge">116%</span>
     </div>
     <div class="slider-row" style="margin-top:18px;">
       <span class="slider-label">B Attack</span>
@@ -1606,6 +1894,67 @@ window.addEventListener('DOMContentLoaded', () => {
       const val = Math.max(0, Math.min(300, parseInt(event.target.value, 10) || init));
       mappingAAdjust.peakScale = val / 100;
       aPeakValue.textContent = `${val}%`;
+    });
+  }
+
+  const aPercentileSlider = document.getElementById('a-percentile-slider');
+  const aPercentileValue = document.getElementById('a-percentile-value');
+  if (aPercentileSlider && aPercentileValue) {
+    const init = mappingAAdjust.normPercentile;
+    aPercentileSlider.value = String(init);
+    aPercentileValue.textContent = String(init);
+    aPercentileSlider.addEventListener('input', (event) => {
+      const val = Math.max(0, Math.min(50, parseInt(event.target.value, 10) || init));
+      mappingAAdjust.normPercentile = val;
+      aPercentileValue.textContent = String(val);
+      // Recalculate normalization when percentile changes
+      if (energyLoaded && energyData.length > 0) {
+        try {
+          perBandNormalizationA = calculatePerBandNormalization(energyData, val);
+          console.log('[Mode A] Recalculated normalization with percentile:', val);
+        } catch(e) {
+          console.warn('Failed to recalculate normalization', e);
+        }
+      }
+    });
+  }
+
+  const aNormLimitSlider = document.getElementById('a-norm-limit-slider');
+  const aNormLimitValue = document.getElementById('a-norm-limit-value');
+  if (aNormLimitSlider && aNormLimitValue) {
+    const init = mappingAAdjust.normLimit;
+    aNormLimitSlider.value = String(init);
+    aNormLimitValue.textContent = `${init}%`;
+    aNormLimitSlider.addEventListener('input', (event) => {
+      const val = Math.max(50, Math.min(300, parseInt(event.target.value, 10) || init));
+      mappingAAdjust.normLimit = val;
+      aNormLimitValue.textContent = `${val}%`;
+    });
+  }
+
+  const aClipStrSlider = document.getElementById('a-clip-str-slider');
+  const aClipStrValue = document.getElementById('a-clip-str-value');
+  if (aClipStrSlider && aClipStrValue) {
+    const init = mappingAAdjust.clipStrength;
+    aClipStrSlider.value = String(init);
+    aClipStrValue.textContent = `${init}%`;
+    aClipStrSlider.addEventListener('input', (event) => {
+      const val = Math.max(10, Math.min(150, parseInt(event.target.value, 10) || init));
+      mappingAAdjust.clipStrength = val;
+      aClipStrValue.textContent = `${val}%`;
+    });
+  }
+
+  const aNormStrSlider = document.getElementById('a-norm-str-slider');
+  const aNormStrValue = document.getElementById('a-norm-str-value');
+  if (aNormStrSlider && aNormStrValue) {
+    const init = mappingAAdjust.normStrength;
+    aNormStrSlider.value = String(init);
+    aNormStrValue.textContent = `${init}%`;
+    aNormStrSlider.addEventListener('input', (event) => {
+      const val = Math.max(0, Math.min(100, parseInt(event.target.value, 10) || init));
+      mappingAAdjust.normStrength = val;
+      aNormStrValue.textContent = `${val}%`;
     });
   }
 
@@ -1893,7 +2242,7 @@ window.addEventListener('DOMContentLoaded', () => {
   let DIFF_MIN_MS_NORMAL = 3000, DIFF_MAX_MS_NORMAL = 9000;   // normal: 3–9s
   let DIFF_MIN_MS_HARD   = 2600, DIFF_MAX_MS_HARD   = 6000;   // hard:   2.6–6s
   // Soft-start window
-  const SOFT_START_SEC = 30;                                   // first 30s
+  const SOFT_START_SEC = 60;                                   // first 60s
   const SOFT_MIN_MS = 4000, SOFT_MAX_MS = 8000;                // 4–8s
   let hitWindowSec = 2.0;     // <= this = hit (was 0.7)
   let goodWindowSec = 1.5;    // <= this = very good (was 0.5)

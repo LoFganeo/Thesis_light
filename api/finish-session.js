@@ -29,9 +29,27 @@ module.exports = async (request, response) => {
         sent_count INTEGER,
         dropped_count INTEGER,
         had_countdown BOOLEAN,
-        created_at TIMESTAMPTZ DEFAULT NOW()
+        created_at TIMESTAMPTZ DEFAULT NOW(),
+        playback_seconds DOUBLE PRECISION,
+        keypress_count INTEGER,
+        hit_count INTEGER,
+        negative_hit_count INTEGER,
+        meets_playback BOOLEAN,
+        meets_keypress BOOLEAN,
+        meets_hits BOOLEAN,
+        zero_hit_but_pressed BOOLEAN,
+        all_negative_hits BOOLEAN
       );
     `;
+    await client.sql`ALTER TABLE thesis_session_meta ADD COLUMN IF NOT EXISTS playback_seconds DOUBLE PRECISION;`.catch(() => {});
+    await client.sql`ALTER TABLE thesis_session_meta ADD COLUMN IF NOT EXISTS keypress_count INTEGER;`.catch(() => {});
+    await client.sql`ALTER TABLE thesis_session_meta ADD COLUMN IF NOT EXISTS hit_count INTEGER;`.catch(() => {});
+    await client.sql`ALTER TABLE thesis_session_meta ADD COLUMN IF NOT EXISTS negative_hit_count INTEGER;`.catch(() => {});
+    await client.sql`ALTER TABLE thesis_session_meta ADD COLUMN IF NOT EXISTS meets_playback BOOLEAN;`.catch(() => {});
+    await client.sql`ALTER TABLE thesis_session_meta ADD COLUMN IF NOT EXISTS meets_keypress BOOLEAN;`.catch(() => {});
+    await client.sql`ALTER TABLE thesis_session_meta ADD COLUMN IF NOT EXISTS meets_hits BOOLEAN;`.catch(() => {});
+    await client.sql`ALTER TABLE thesis_session_meta ADD COLUMN IF NOT EXISTS zero_hit_but_pressed BOOLEAN;`.catch(() => {});
+    await client.sql`ALTER TABLE thesis_session_meta ADD COLUMN IF NOT EXISTS all_negative_hits BOOLEAN;`.catch(() => {});
     await client.sql`ALTER TABLE thesis_session_meta DROP COLUMN IF EXISTS had_preview;`;
 
     const sessionRes = await client.sql`
@@ -61,14 +79,53 @@ module.exports = async (request, response) => {
     const thresholds = { meetsPlayback, meetsKeypress, meetsHits, zeroHitButPressed, allNegativeHits };
 
     await client.sql`
-      INSERT INTO thesis_session_meta (session_id, action, sent_count, dropped_count, had_countdown)
-      VALUES (${sid}, ${action}, ${sentNum}, ${droppedNum}, ${countdownFlag})
+      INSERT INTO thesis_session_meta (
+        session_id,
+        action,
+        sent_count,
+        dropped_count,
+        had_countdown,
+        playback_seconds,
+        keypress_count,
+        hit_count,
+        negative_hit_count,
+        meets_playback,
+        meets_keypress,
+        meets_hits,
+        zero_hit_but_pressed,
+        all_negative_hits
+      )
+      VALUES (
+        ${sid},
+        ${action},
+        ${sentNum},
+        ${droppedNum},
+        ${countdownFlag},
+        ${mergedStats.playbackSeconds},
+        ${mergedStats.keypressCount},
+        ${mergedStats.hitCount},
+        ${mergedStats.negativeHitCount},
+        ${meetsPlayback},
+        ${meetsKeypress},
+        ${meetsHits},
+        ${zeroHitButPressed},
+        ${allNegativeHits}
+      )
       ON CONFLICT (session_id)
       DO UPDATE SET
         action = EXCLUDED.action,
         sent_count = EXCLUDED.sent_count,
         dropped_count = EXCLUDED.dropped_count,
         had_countdown = EXCLUDED.had_countdown,
+        playback_seconds = EXCLUDED.playback_seconds,
+        keypress_count = EXCLUDED.keypress_count,
+        hit_count = EXCLUDED.hit_count,
+        negative_hit_count = EXCLUDED.negative_hit_count,
+        meets_playback = EXCLUDED.meets_playback,
+        meets_keypress = EXCLUDED.meets_keypress,
+        meets_hits = EXCLUDED.meets_hits,
+        zero_hit_but_pressed = EXCLUDED.zero_hit_but_pressed,
+        all_negative_hits = EXCLUDED.all_negative_hits,
         created_at = NOW();
     `;
 

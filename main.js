@@ -2490,7 +2490,7 @@ window.addEventListener('DOMContentLoaded', () => {
       <div class="welcome-content">
         <h1 class="welcome-title">Feedback</h1>
         <p class="welcome-text">How many times do you think the mode switched?</p>
-        <input type="range" min="1" max="30" step="1" value="15" id="fb-count" class="nicer-range" />
+        <input type="range" min="1" max="50" step="1" value="25" id="fb-count" class="nicer-range" />
         <div id="fb-count-wrap" style="margin-top:10px;font-size:24px;font-weight:700;letter-spacing:1px"><span id="fb-count-val"></span></div>
         <div style="margin-top:18px"></div>
         <p class="welcome-text">How difficult was it?</p>

@@ -2233,11 +2233,11 @@ window.addEventListener('DOMContentLoaded', () => {
       </div>
       <p class="welcome-text mode-line">The colored regions may relocate smoothly when you achieve several consecutive accurate presses.
       Please adjust the Color panel based on your perference first, then you can start detecting changes.</p>
+      <button class="welcome-button" id="mode-compare-continue">Continue</button>
       <div class="spacebar-hint">
         <p class="hint-text">You can press SPACEBAR now to see the effect</p>
         <div class="hint-arrow">↓</div>
       </div>
-      <button class="welcome-button" id="mode-compare-continue">Continue</button>
     </div>
   `;
   document.body.appendChild(modeCompareOverlay);
@@ -3082,7 +3082,7 @@ window.addEventListener('DOMContentLoaded', () => {
       <div class="welcome-content">
         <h1 class="welcome-title">Welcome</h1>
         <p class="welcome-text"><strong>Your Task:</strong> Press <strong style="color:#4ecdc4;">SPACEBAR</strong> whenever you notice the visual pattern change</p>
-        <p class="welcome-text"><strong>Duration:</strong> ~3.5 minutes</p>
+        <p class="welcome-text"><strong>Duration:</strong> ~3 minutes</p>
         <p class="welcome-text"><strong>Equipment:</strong> Headphones recommended</p>
         <button class="welcome-button">Enter</button>
       </div>

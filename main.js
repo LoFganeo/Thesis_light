@@ -56,6 +56,7 @@ let lastSwitchTime = 0;   // updated on mode switch
 
 // Marker pulse overlay (Space key visual feedback)
 let markerPulse = null; // { start: millis(), duration: 900 }
+let testMarkerPulse = null; // { start: timestamp, duration: 900 } - for testing phase canvas
 const SPACE_COOLDOWN_MS = 1000;
 let spaceHoldActive = false;
 let lastSpaceReleaseTime = 0;
@@ -1306,7 +1307,7 @@ function draw() {
   // Edge glow overlay for Space key marker (Siri-like soft colorful gradient)
   if (markerPulse) {
     const elapsed = millis() - markerPulse.start;
-    const dur = markerPulse.duration || 450; // keep faster pulse
+    const dur = markerPulse.duration || 900;
     if (elapsed >= dur) {
       markerPulse = null;
     } else {
@@ -1675,33 +1676,188 @@ window.addEventListener('DOMContentLoaded', () => {
     opacity: 1;
   }
 
-  #welcome-overlay.space-test-glow::after,
-  #mode-compare-overlay.space-test-glow::after,
-  #countdown-overlay.space-test-glow::after {
-    content: '';
-    position: absolute;
-    inset: 0;
-    border: 2px solid rgba(120,220,255,0.65);
-    box-shadow:
-      0 0 20px rgba(80,200,255,0.55),
-      0 0 45px rgba(40,140,255,0.35);
-    opacity: 0;
-    animation: overlayEdgePulse 0.45s ease-out forwards;
-    pointer-events: none;
-  }
-
-  @keyframes overlayEdgePulse {
-    0% { opacity: 0; }
-    20% { opacity: 0.9; }
-    100% { opacity: 0; }
-  }
-
   /* Feedback slider styling */
   .nicer-range { -webkit-appearance:none; appearance:none; width:80%; height:6px; background: linear-gradient(90deg,#4ecdc4,#8df1ea); border-radius: 4px; outline:none; }
   .nicer-range::-webkit-slider-thumb { -webkit-appearance:none; width:22px; height:22px; background:#fff; border:3px solid #4ecdc4; border-radius:50%; box-shadow:0 2px 8px rgba(0,0,0,0.4); cursor:pointer; }
   .nicer-range::-moz-range-thumb { width:22px; height:22px; background:#fff; border:3px solid #4ecdc4; border-radius:50%; box-shadow:0 2px 8px rgba(0,0,0,0.4); cursor:pointer; }
+
+  /* Spacebar hint with bouncing arrow */
+  .spacebar-hint {
+    margin-top: 30px;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    gap: 12px;
+  }
+  .hint-text {
+    font-size: 18px;
+    color: rgba(255,255,255,0.9);
+    font-weight: 600;
+    letter-spacing: 0.5px;
+    animation: fadePulse 2s ease-in-out infinite;
+  }
+  .hint-arrow {
+    font-size: 48px;
+    color: #4ecdc4;
+    line-height: 1;
+    animation: bounceArrow 1.5s ease-in-out infinite;
+    text-shadow: 0 0 20px rgba(78,205,196,0.6);
+  }
+  @keyframes fadePulse {
+    0%, 100% { opacity: 0.7; }
+    50% { opacity: 1; }
+  }
+  @keyframes bounceArrow {
+    0%, 100% {
+      transform: translateY(0px);
+      opacity: 1;
+    }
+    50% {
+      transform: translateY(12px);
+      opacity: 0.6;
+    }
+  }
   `;
   document.head.appendChild(style);
+
+  // Test spacebar canvas overlay (for testing phases - Welcome, Mode Preview, Countdown)
+  const testCanvas = document.createElement('canvas');
+  testCanvas.id = 'test-spacebar-canvas';
+  testCanvas.style.cssText = `
+    position: fixed;
+    top: 0;
+    left: 0;
+    width: 100%;
+    height: 100%;
+    pointer-events: none;
+    z-index: 10001;
+    display: none;
+  `;
+  document.body.appendChild(testCanvas);
+
+  // Render loop for test spacebar canvas effect
+  const renderTestSpacebarEffect = () => {
+    if (!testMarkerPulse) {
+      testCanvas.style.display = 'none';
+      requestAnimationFrame(renderTestSpacebarEffect);
+      return;
+    }
+
+    const now = performance.now();
+    const elapsed = now - testMarkerPulse.start;
+    const dur = testMarkerPulse.duration || 900;
+
+    if (elapsed >= dur) {
+      testMarkerPulse = null;
+      testCanvas.style.display = 'none';
+      requestAnimationFrame(renderTestSpacebarEffect);
+      return;
+    }
+
+    // Show canvas and resize to window
+    testCanvas.style.display = 'block';
+    const w = window.innerWidth;
+    const h = window.innerHeight;
+    if (testCanvas.width !== w || testCanvas.height !== h) {
+      testCanvas.width = w;
+      testCanvas.height = h;
+    }
+
+    const ctx = testCanvas.getContext('2d');
+    ctx.clearRect(0, 0, w, h);
+
+    // Replicate markerPulse drawing logic exactly
+    const t = elapsed / dur; // 0..1
+    const ease = Math.sin(t * Math.PI); // in-out
+    const thick = 0.75 + ease * 2.25;
+    const thickOuter = thick * 1.8;
+    const alphaBase = (40 + ease * 180) / 3;
+    const hueShift = (now * 0.12) % 360; // ~120deg/s rotation
+
+    ctx.globalCompositeOperation = 'lighter'; // ADD blend mode equivalent
+    ctx.lineCap = 'round';
+
+    const cx = w / 2;
+    const cy = h / 2;
+
+    const drawEdgeDots = (inset, weight, alphaMul) => {
+      const step = Math.max(2, Math.floor(weight * 0.9));
+
+      // Helper to convert HSB to RGB
+      const hsbToRgb = (h, s, b, a) => {
+        h = h % 360;
+        s = s / 100;
+        b = b / 100;
+        const k = (n) => (n + h / 60) % 6;
+        const f = (n) => b * (1 - s * Math.max(0, Math.min(k(n), 4 - k(n), 1)));
+        const r = Math.round(255 * f(5));
+        const g = Math.round(255 * f(3));
+        const bl = Math.round(255 * f(1));
+        return `rgba(${r},${g},${bl},${a})`;
+      };
+
+      // Top & bottom edges
+      for (let x = inset; x <= w - inset; x += step) {
+        const yTop = inset;
+        const yBot = h - inset;
+
+        // Top
+        let ang = Math.atan2(yTop - cy, x - cx);
+        let hue = ((ang * 180 / Math.PI) + 360) % 360;
+        hue = (hue + hueShift) % 360;
+        const alpha = (alphaBase * alphaMul) / 255;
+        ctx.fillStyle = hsbToRgb(hue, 80, 100, alpha);
+        ctx.beginPath();
+        ctx.arc(x, yTop, weight / 2, 0, Math.PI * 2);
+        ctx.fill();
+
+        // Bottom
+        ang = Math.atan2(yBot - cy, x - cx);
+        hue = ((ang * 180 / Math.PI) + 360) % 360;
+        hue = (hue + hueShift) % 360;
+        ctx.fillStyle = hsbToRgb(hue, 80, 100, alpha);
+        ctx.beginPath();
+        ctx.arc(x, yBot, weight / 2, 0, Math.PI * 2);
+        ctx.fill();
+      }
+
+      // Left & right edges
+      for (let y = inset; y <= h - inset; y += step) {
+        const xL = inset;
+        const xR = w - inset;
+
+        // Left
+        let ang = Math.atan2(y - cy, xL - cx);
+        let hue = ((ang * 180 / Math.PI) + 360) % 360;
+        hue = (hue + hueShift) % 360;
+        const alpha = (alphaBase * alphaMul) / 255;
+        ctx.fillStyle = hsbToRgb(hue, 80, 100, alpha);
+        ctx.beginPath();
+        ctx.arc(xL, y, weight / 2, 0, Math.PI * 2);
+        ctx.fill();
+
+        // Right
+        ang = Math.atan2(y - cy, xR - cx);
+        hue = ((ang * 180 / Math.PI) + 360) % 360;
+        hue = (hue + hueShift) % 360;
+        ctx.fillStyle = hsbToRgb(hue, 80, 100, alpha);
+        ctx.beginPath();
+        ctx.arc(xR, y, weight / 2, 0, Math.PI * 2);
+        ctx.fill();
+      }
+    };
+
+    const insetBase = thick * 0.5;
+    // Soft outer glow
+    drawEdgeDots(insetBase + thick * 0.6, thickOuter, 0.45);
+    // Crisp inner glow
+    drawEdgeDots(insetBase, thick, 1.0);
+
+    requestAnimationFrame(renderTestSpacebarEffect);
+  };
+
+  // Start the render loop
+  requestAnimationFrame(renderTestSpacebarEffect);
 
   // Play FAB
   const playFab = document.createElement('button');
@@ -2062,10 +2218,9 @@ window.addEventListener('DOMContentLoaded', () => {
   modeCompareOverlay.innerHTML = `
     <div class="welcome-content mode-preview">
       <h1 class="welcome-title">Mode Mapping Preview</h1>
+      <p class="welcome-text mode-line"><strong style="color:#4ecdc4;">IMPORTANT:</strong> Press <strong style="color:#4ecdc4;">SPACEBAR</strong> whenever you notice the visual pattern change!</p>
       <p class="welcome-text mode-line">The experiment contains two modes: Mode A (instant response) and Mode B (energy accumulation).
       The experiment will start randomly from either mode A or B, with automatic switches between.</p>
-      <p class="welcome-text mode-line">Press the Spacebar when you feel the switch happening.
-      The screen edges glow when you press (You can press now to see the effect).</p>
       <div class="mode-demo-grid">
         <div class="mode-demo-item">
           <video src="./videos/M-A.mp4" autoplay muted loop playsinline></video>
@@ -2078,6 +2233,10 @@ window.addEventListener('DOMContentLoaded', () => {
       </div>
       <p class="welcome-text mode-line">The colored regions may relocate smoothly when you achieve several consecutive accurate presses.
       Please adjust the Color panel based on your perference first, then you can start detecting changes.</p>
+      <div class="spacebar-hint">
+        <p class="hint-text">You can press SPACEBAR now to see the effect</p>
+        <div class="hint-arrow">↓</div>
+      </div>
       <button class="welcome-button" id="mode-compare-continue">Continue</button>
     </div>
   `;
@@ -2594,28 +2753,15 @@ window.addEventListener('DOMContentLoaded', () => {
 
   let logCount = 0;
   function triggerSpaceTestGlow() {
-    const overlayOrder = ['mode-compare-overlay', 'countdown-overlay', 'welcome-overlay'];
-    const target = overlayOrder
-      .map(id => document.getElementById(id))
-      .find(el => {
-        if (!el) return false;
-        if (el.id === 'mode-compare-overlay' && el.classList.contains('hidden')) return false;
-        if (el.id === 'countdown-overlay' && !el.classList.contains('visible')) return false;
-        return true;
-      });
-    if (!target) return;
-    target.classList.add('space-test-glow');
-    if (target._spaceGlowTimer) clearTimeout(target._spaceGlowTimer);
-    target._spaceGlowTimer = setTimeout(() => {
-      target.classList.remove('space-test-glow');
-      target._spaceGlowTimer = null;
-    }, 500);
+    // Trigger canvas-based spacebar effect for testing phases
+    // This exactly replicates the experiment phase effect for 100% consistency
+    testMarkerPulse = { start: performance.now(), duration: 900 };
   }
 
   function logAndTriggerPulse() {
     // CRITICAL: Always trigger visual pulse for user feedback
     // This provides immediate visual response regardless of logging phase
-    markerPulse = { start: millis(), duration: 450 };
+    markerPulse = { start: millis(), duration: 900 };
 
     // During testing phases (welcome, countdown, mode-compare),
     // show pulse but skip logging to avoid recording non-experimental data
@@ -2935,9 +3081,9 @@ window.addEventListener('DOMContentLoaded', () => {
     overlay.innerHTML = `
       <div class="welcome-content">
         <h1 class="welcome-title">Welcome</h1>
-        <p class="welcome-text">Thank you for completing the Qualtrics survey.</p>
-        <p class="welcome-text">You will experience a combined audiovisual content.</p>
-        <p class="welcome-text">(Headphones recommended for best experience)</p>
+        <p class="welcome-text"><strong>Your Task:</strong> Press <strong style="color:#4ecdc4;">SPACEBAR</strong> whenever you notice the visual pattern change</p>
+        <p class="welcome-text"><strong>Duration:</strong> ~3.5 minutes</p>
+        <p class="welcome-text"><strong>Equipment:</strong> Headphones recommended</p>
         <button class="welcome-button">Enter</button>
       </div>
     `;

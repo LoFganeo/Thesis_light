@@ -2638,6 +2638,12 @@ window.addEventListener('DOMContentLoaded', () => {
 
   // Feedback slider overlay (1-15) and thanks screen
   function showFeedbackSlider(){
+    // Prevent duplicate overlays - remove any existing feedback overlay first
+    const existingFeedback = document.getElementById('feedback-overlay');
+    if (existingFeedback && existingFeedback.parentNode) {
+      existingFeedback.parentNode.removeChild(existingFeedback);
+    }
+
     updatePlaybackStats();
     const evaluationAtFeedback = evaluateSessionStats();
     if (pendingFinalizeAction !== 'cancel') {
@@ -2701,6 +2707,12 @@ window.addEventListener('DOMContentLoaded', () => {
   }
 
   function showThanks(){
+    // Prevent duplicate overlays - remove any existing thanks overlay first
+    const existingThanks = document.getElementById('thanks-overlay');
+    if (existingThanks && existingThanks.parentNode) {
+      existingThanks.parentNode.removeChild(existingThanks);
+    }
+
     const overlay = document.createElement('div');
     overlay.id = 'thanks-overlay';
     const released = lastFinalizeResult && lastFinalizeResult.status === 'released';

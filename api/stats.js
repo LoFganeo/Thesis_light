@@ -10,7 +10,16 @@ export default async function handler(req, res) {
   try {
     // Get comprehensive stats in one query
     const stats = await sql`
-      WITH valid_sessions AS (
+      WITH latest_feedback AS (
+        SELECT DISTINCT ON (session_id)
+          session_id,
+          times_guessed,
+          difficulty_rating,
+          created_at
+        FROM thesis_feedback
+        ORDER BY session_id, created_at DESC
+      ),
+      valid_sessions AS (
         SELECT
           s.session_id,
           s.participant_id,
@@ -27,7 +36,7 @@ export default async function handler(req, res) {
             ELSE 0
           END as hit_rate_pct
         FROM thesis_sessions s
-        LEFT JOIN thesis_feedback f ON s.session_id = f.session_id
+        LEFT JOIN latest_feedback f ON s.session_id = f.session_id
         WHERE s.status = 'final' AND s.valid = true
       ),
       session_counts AS (

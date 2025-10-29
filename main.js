@@ -2683,6 +2683,13 @@ window.addEventListener('DOMContentLoaded', () => {
         alert('Session is not ready. Please wait a moment and try again.');
         return;
       }
+      // Prevent duplicate submissions - disable button immediately
+      if (btn.disabled) return;
+      btn.disabled = true;
+      btn.textContent = 'Submitting...';
+      btn.style.opacity = '0.6';
+      btn.style.cursor = 'not-allowed';
+
       const payload = {
         participantId: (typeof participantId === 'string') ? participantId : null,
         sessionId: sessionId,

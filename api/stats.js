@@ -14,10 +14,9 @@ export default async function handler(req, res) {
         SELECT DISTINCT ON (session_id)
           session_id,
           times_guessed,
-          difficulty_rating,
-          created_at
+          difficulty_rating
         FROM thesis_feedback
-        ORDER BY session_id, created_at DESC
+        ORDER BY session_id, id DESC
       ),
       valid_sessions AS (
         SELECT

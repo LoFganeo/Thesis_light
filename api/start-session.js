@@ -72,12 +72,11 @@ module.exports = async (request, response) => {
         playback_seconds,
         keypress_count,
         hit_count,
-        negative_hit_count,
+        anticipatory_count,
         valid,
         last_event_at,
         created_at,
-        email_hash,
-        email
+        email_hash
       )
       VALUES (
         ${sessionId},
@@ -90,8 +89,7 @@ module.exports = async (request, response) => {
         FALSE,
         NOW(),
         NOW(),
-        ${normalizedEmailHash},
-        ${normalizedEmail}
+        ${normalizedEmailHash}
       )
       ON CONFLICT (participant_id) DO NOTHING
       RETURNING session_id;

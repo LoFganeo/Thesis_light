@@ -26,7 +26,7 @@ module.exports = async (request, response) => {
     const sid = String(sessionId);
 
     await client.sql`
-      INSERT INTO thesis_logs (participant_id, session_id, audio_time, current_mode, last_switch_time, delta_time)
+      INSERT INTO thesis_logs (participant_id, session_id, keypress_time, current_mode, last_switch_time, rt)
       VALUES (${participantId}, ${sid}, ${at}, ${currentMode || null}, ${lst}, ${delta});
     `;
 
@@ -38,7 +38,7 @@ module.exports = async (request, response) => {
       UPDATE thesis_sessions
       SET keypress_count     = keypress_count + 1,
           hit_count          = hit_count + ${isHit ? 1 : 0},
-          negative_hit_count = negative_hit_count + ${isNegative ? 1 : 0},
+          anticipatory_count = anticipatory_count + ${isNegative ? 1 : 0},
           playback_seconds   = GREATEST(playback_seconds, ${playback}),
           last_event_at      = NOW()
       WHERE session_id = ${sid} AND status = 'pending';

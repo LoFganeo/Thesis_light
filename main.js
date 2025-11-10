@@ -2566,6 +2566,19 @@ window.addEventListener('DOMContentLoaded', () => {
     // Hide tutorial overlay immediately when button is clicked
     tutorialOverlay.classList.remove('active');
 
+    // Explicitly hide all tutorial child elements to ensure they disappear
+    const tutorialTitle = tutorialOverlay.querySelector('.tutorial-title');
+    const tutorialInstruction = tutorialOverlay.querySelector('.tutorial-instruction');
+    const tutorialCounter = document.getElementById('tutorial-counter');
+    const tutorialFeedback = document.getElementById('tutorial-feedback');
+    const startBtn = document.getElementById('tutorial-start-btn');
+
+    if (tutorialTitle) tutorialTitle.style.display = 'none';
+    if (tutorialInstruction) tutorialInstruction.style.display = 'none';
+    if (tutorialCounter) tutorialCounter.style.display = 'none';
+    if (tutorialFeedback) tutorialFeedback.style.display = 'none';
+    if (startBtn) startBtn.style.display = 'none';
+
     // Ensure session is started
     const ready = await ensureSessionStarted();
     if (!ready) {

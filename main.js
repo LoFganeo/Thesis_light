@@ -2579,6 +2579,19 @@ window.addEventListener('DOMContentLoaded', () => {
     if (tutorialFeedback) tutorialFeedback.style.display = 'none';
     if (startBtn) startBtn.style.display = 'none';
 
+    // Hide all UI panels - only play button should remain visible
+    const colorToolbar = document.getElementById('color-toolbar');
+    const controlPanel = document.getElementById('control-panel');
+    const mappingPanel = document.getElementById('mapping-panel');
+    const tourBubble = document.getElementById('tour-bubble');
+    const hueBubble = document.getElementById('hue-bubble');
+
+    if (colorToolbar) colorToolbar.style.display = 'none';
+    if (controlPanel) controlPanel.style.display = 'none';
+    if (mappingPanel) mappingPanel.style.display = 'none';
+    if (tourBubble) tourBubble.style.display = 'none';
+    if (hueBubble) hueBubble.style.display = 'none';
+
     // Ensure session is started
     const ready = await ensureSessionStarted();
     if (!ready) {

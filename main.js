@@ -67,6 +67,7 @@ let countdownActive = false;
 let tutorialActive = false;
 let tutorialPassed = false;
 let tutorialHitCount = 0;
+let tutorialMissCount = 0; // Track consecutive misses
 let tutorialRequiredHits = 3;
 let tutorialStartTime = 0;
 let tutorialLastSwitchTime = 0;
@@ -2381,6 +2382,7 @@ window.addEventListener('DOMContentLoaded', () => {
     tutorialActive = true;
     tutorialPassed = false;
     tutorialHitCount = 0;
+    tutorialMissCount = 0;
     tutorialSwitches = [];
 
     // Generate tutorial mode switches (extended duration for more practice)
@@ -2483,17 +2485,28 @@ window.addEventListener('DOMContentLoaded', () => {
     if (isHit) {
       feedbackEl.textContent = '✓ Hit!';
       feedbackEl.className = 'hit';
+      tutorialMissCount = 0; // Reset miss count on hit
       console.log('[Tutorial] Hit! Count:', tutorialHitCount);
     } else {
-      // Determine if too early or too late
-      const nextSwitch = tutorialSwitches.find(t => t > currentTime);
-      if (nextSwitch && (nextSwitch - currentTime) > 2.0) {
-        feedbackEl.textContent = 'Missed - Too early!';
+      tutorialMissCount++;
+      console.log('[Tutorial] Miss at time:', currentTime, 'Miss count:', tutorialMissCount);
+
+      // Penalty: 2 misses reduce hit count by 1
+      if (tutorialMissCount >= 2) {
+        tutorialHitCount = Math.max(0, tutorialHitCount - 1);
+        tutorialMissCount = 0; // Reset miss counter
+        feedbackEl.textContent = '⚠️ -1 Hit (2 misses)';
+        console.log('[Tutorial] Penalty applied! New hit count:', tutorialHitCount);
       } else {
-        feedbackEl.textContent = 'Missed - Too late!';
+        // Determine if too early or too late
+        const nextSwitch = tutorialSwitches.find(t => t > currentTime);
+        if (nextSwitch && (nextSwitch - currentTime) > 2.0) {
+          feedbackEl.textContent = 'Missed - Too early!';
+        } else {
+          feedbackEl.textContent = 'Missed - Too late!';
+        }
       }
       feedbackEl.className = 'miss';
-      console.log('[Tutorial] Miss at time:', currentTime);
     }
 
     // Update counter

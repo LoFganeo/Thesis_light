@@ -2563,8 +2563,8 @@ window.addEventListener('DOMContentLoaded', () => {
 
   // Tutorial start experiment button handler
   document.getElementById('tutorial-start-btn').addEventListener('click', async () => {
-    // Keep tutorial overlay visible - don't hide it here
-    // It will be hidden when countdown finishes and playback starts
+    // Hide tutorial overlay immediately when button is clicked
+    tutorialOverlay.classList.remove('active');
 
     // Ensure session is started
     const ready = await ensureSessionStarted();
@@ -2598,8 +2598,6 @@ window.addEventListener('DOMContentLoaded', () => {
           countdownOverlay.classList.remove('visible');
           countdownActive = false;
           allowSpaceTesting = false;
-          // Hide tutorial overlay when playback starts
-          tutorialOverlay.classList.remove('active');
           if (window.audio) {
             window.audio.play();
             markPlaybackStarted();
@@ -2611,8 +2609,6 @@ window.addEventListener('DOMContentLoaded', () => {
     } else {
       allowSpaceTesting = false;
       countdownActive = false;
-      // Hide tutorial overlay when playback starts
-      tutorialOverlay.classList.remove('active');
       if (window.audio) {
         window.audio.play();
         markPlaybackStarted();

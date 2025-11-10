@@ -45,11 +45,6 @@ export default async function handler(req, res) {
           COUNT(CASE WHEN valid = true THEN 1 END) as valid_count
         FROM thesis_sessions
         GROUP BY status
-      ),
-      meta_counts AS (
-        SELECT action, COUNT(*) as count
-        FROM thesis_session_meta
-        GROUP BY action
       )
       SELECT
         (SELECT COUNT(DISTINCT session_id) FROM valid_sessions) as total_valid_sessions,
@@ -62,7 +57,6 @@ export default async function handler(req, res) {
         (SELECT COUNT(*) FROM valid_sessions WHERE hit_rate_pct >= 65) as high_quality_count,
         (SELECT COUNT(*) FROM valid_sessions WHERE hit_rate_pct < 35) as low_quality_count,
         (SELECT json_agg(row_to_json(t)) FROM (SELECT * FROM session_counts) t) as session_status,
-        (SELECT json_agg(row_to_json(t)) FROM (SELECT * FROM meta_counts) t) as meta_actions,
         (SELECT json_agg(row_to_json(t)) FROM (
           SELECT participant_id, keypress_count, hit_count, hit_rate_pct,
                  times_guessed, difficulty_rating, created_at
@@ -111,8 +105,7 @@ export default async function handler(req, res) {
         difficulty: parseFloat(result.avg_difficulty) || 0
       },
       session_breakdown: {
-        by_status: result.session_status || [],
-        by_action: result.meta_actions || []
+        by_status: result.session_status || []
       },
       recent_sessions: result.recent_sessions || [],
       data_quality: {

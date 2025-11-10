@@ -5,6 +5,7 @@ module.exports = async (request, response) => {
     return response.status(405).json({ error: 'Method Not Allowed' });
   }
 
+  let client;
   try {
     const { participantId, sessionId, audioTime, currentMode, lastSwitchTime } = request.body || {};
 
@@ -15,7 +16,7 @@ module.exports = async (request, response) => {
       return response.status(400).json({ error: 'sessionId is required' });
     }
 
-    const client = await db.connect();
+    client = await db.connect();
 
     // DDL operations removed - tables should already exist
     // If you need to create tables, run migrations separately
@@ -50,5 +51,7 @@ module.exports = async (request, response) => {
   } catch (error) {
     console.error('[api/log] Error saving log:', error);
     response.status(500).json({ error: error.message });
+  } finally {
+    if (client) client.release();
   }
 };

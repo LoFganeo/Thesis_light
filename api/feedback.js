@@ -5,6 +5,7 @@ module.exports = async (request, response) => {
     return response.status(405).json({ error: 'Method Not Allowed' });
   }
 
+  let client;
   try {
     const { participantId, sessionId, timesGuessed, difficultyRating, comments } = request.body || {};
 
@@ -12,7 +13,7 @@ module.exports = async (request, response) => {
       return response.status(400).json({ ok: false, error: 'sessionId is required' });
     }
 
-    const client = await db.connect();
+    client = await db.connect();
     // DDL operations removed - tables should already exist
 
     const diffNum = Number(difficultyRating);
@@ -44,5 +45,7 @@ module.exports = async (request, response) => {
   } catch (error) {
     console.error('[api/feedback] Error:', error);
     response.status(500).json({ ok: false, error: error.message });
+  } finally {
+    if (client) client.release();
   }
 };

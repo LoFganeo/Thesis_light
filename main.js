@@ -1793,6 +1793,33 @@ window.addEventListener('DOMContentLoaded', () => {
   .tutorial-retry.hidden {
     display: none;
   }
+  .tutorial-start {
+    position: fixed;
+    top: 55%;
+    left: 50%;
+    transform: translate(-50%, -50%);
+    margin-top: 60px;
+    padding: 16px 40px;
+    font-size: 1.3em;
+    background: #4ecdc4;
+    color: #1a1a2e;
+    border: none;
+    border-radius: 12px;
+    cursor: pointer;
+    font-weight: 700;
+    transition: all 0.3s ease;
+    box-shadow: 0 6px 20px rgba(78, 205, 196, 0.4);
+    letter-spacing: 0.5px;
+    text-transform: uppercase;
+  }
+  .tutorial-start:hover {
+    background: #5fe0d0;
+    transform: translate(-50%, -50%) translateY(-3px);
+    box-shadow: 0 8px 24px rgba(78, 205, 196, 0.5);
+  }
+  .tutorial-start.hidden {
+    display: none;
+  }
 
   /* Feedback slider styling */
   .nicer-range { -webkit-appearance:none; appearance:none; width:80%; height:6px; background: linear-gradient(90deg,#4ecdc4,#8df1ea); border-radius: 4px; outline:none; }
@@ -2340,6 +2367,7 @@ window.addEventListener('DOMContentLoaded', () => {
       <div id="tutorial-feedback"></div>
       <div id="tutorial-counter">Hits: <span id="tutorial-hit-count">0</span>/${tutorialRequiredHits}</div>
       <button id="tutorial-retry-btn" class="tutorial-retry hidden">Retry Tutorial</button>
+      <button id="tutorial-start-btn" class="tutorial-start hidden">Start Experiment</button>
     </div>
   `;
   document.body.appendChild(tutorialOverlay);
@@ -2496,23 +2524,31 @@ window.addEventListener('DOMContentLoaded', () => {
       tutorialModeListener = null;
     }
 
-    // Show success message
+    // Show success message and Start button
     const feedbackEl = document.getElementById('tutorial-feedback');
     feedbackEl.textContent = '🎉 Tutorial Complete!';
     feedbackEl.className = 'hit';
 
-    // Hide overlay and proceed
-    setTimeout(() => {
-      tutorialOverlay.classList.remove('active');
-      if (window.audio) {
-        window.audio.pause();
-        window.audio.currentTime = 0;
-      }
-      // Show the mode compare overlay
-      showModeCompareOverlay(() => {
-        showGuidedBubbles();
-      });
-    }, 1500);
+    // Hide counter and title/instruction
+    const tutorialTitle = tutorialOverlay.querySelector('.tutorial-title');
+    const tutorialInstruction = tutorialOverlay.querySelector('.tutorial-instruction');
+    const tutorialCounter = document.getElementById('tutorial-counter');
+    if (tutorialTitle) tutorialTitle.style.display = 'none';
+    if (tutorialInstruction) tutorialInstruction.style.display = 'none';
+    if (tutorialCounter) tutorialCounter.style.display = 'none';
+
+    // Show Start button
+    const startBtn = document.getElementById('tutorial-start-btn');
+    if (startBtn) {
+      startBtn.classList.remove('hidden');
+      startBtn.style.display = 'block';
+    }
+
+    // Pause audio and reset
+    if (window.audio) {
+      window.audio.pause();
+      window.audio.currentTime = 0;
+    }
   }
 
   function failTutorial() {
@@ -2527,6 +2563,63 @@ window.addEventListener('DOMContentLoaded', () => {
       window.audio.currentTime = 0;
     }
     startTutorial();
+  });
+
+  // Tutorial start experiment button handler
+  document.getElementById('tutorial-start-btn').addEventListener('click', async () => {
+    // Hide tutorial overlay
+    tutorialOverlay.classList.remove('active');
+
+    // Ensure session is started
+    const ready = await ensureSessionStarted();
+    if (!ready) {
+      return;
+    }
+
+    // Start countdown directly
+    if (featureConfig.enableCountdown) {
+      featureUsage.hadCountdown = true;
+      const countdownNumber = document.getElementById('countdown-number');
+      countdownOverlay.classList.add('visible');
+      countdownActive = true;
+      allowSpaceTesting = true;
+      let count = 3;
+
+      const showNumber = (num) => {
+        countdownNumber.textContent = num;
+        countdownNumber.classList.add('show');
+        setTimeout(() => {
+          countdownNumber.classList.remove('show');
+        }, 650);
+      };
+
+      const countdownInterval = setInterval(() => {
+        if (count > 0) {
+          showNumber(count);
+          count--;
+        } else {
+          clearInterval(countdownInterval);
+          countdownOverlay.classList.remove('visible');
+          countdownActive = false;
+          allowSpaceTesting = false;
+          if (window.audio) {
+            window.audio.play();
+            markPlaybackStarted();
+            window._previewLights = false;
+            setPlayIcon();
+          }
+        }
+      }, 1000);
+    } else {
+      allowSpaceTesting = false;
+      countdownActive = false;
+      if (window.audio) {
+        window.audio.play();
+        markPlaybackStarted();
+        window._previewLights = false;
+        setPlayIcon();
+      }
+    }
   });
 
   const modeCompareOverlay = document.createElement('div');

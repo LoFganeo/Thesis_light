@@ -3006,6 +3006,34 @@ window.addEventListener('DOMContentLoaded', () => {
       }
 
       if (featureConfig.enableCountdown) {
+        // Hide all UI elements before countdown - only play button should remain visible
+        const tutorialOverlay = document.getElementById('tutorial-overlay');
+        const colorToolbar = document.getElementById('color-toolbar');
+        const controlPanel = document.getElementById('control-panel');
+        const mappingPanel = document.getElementById('mapping-panel');
+        const tourBubble = document.getElementById('tour-bubble');
+        const hueBubble = document.getElementById('hue-bubble');
+
+        if (tutorialOverlay) tutorialOverlay.classList.remove('active');
+        if (colorToolbar) colorToolbar.style.display = 'none';
+        if (controlPanel) controlPanel.style.display = 'none';
+        if (mappingPanel) mappingPanel.style.display = 'none';
+        if (tourBubble) tourBubble.style.display = 'none';
+        if (hueBubble) hueBubble.style.display = 'none';
+
+        // Also explicitly hide all tutorial child elements
+        const tutorialTitle = document.querySelector('.tutorial-title');
+        const tutorialInstruction = document.querySelector('.tutorial-instruction');
+        const tutorialCounter = document.getElementById('tutorial-counter');
+        const tutorialFeedback = document.getElementById('tutorial-feedback');
+        const startBtn = document.getElementById('tutorial-start-btn');
+
+        if (tutorialTitle) tutorialTitle.style.display = 'none';
+        if (tutorialInstruction) tutorialInstruction.style.display = 'none';
+        if (tutorialCounter) tutorialCounter.style.display = 'none';
+        if (tutorialFeedback) tutorialFeedback.style.display = 'none';
+        if (startBtn) startBtn.style.display = 'none';
+
         featureUsage.hadCountdown = true;
         const countdownNumber = document.getElementById('countdown-number');
         countdownOverlay.classList.add('visible');
@@ -3037,6 +3065,34 @@ window.addEventListener('DOMContentLoaded', () => {
           }
         }, 1000);
       } else {
+        // Hide all UI elements when playing without countdown
+        const tutorialOverlay = document.getElementById('tutorial-overlay');
+        const colorToolbar = document.getElementById('color-toolbar');
+        const controlPanel = document.getElementById('control-panel');
+        const mappingPanel = document.getElementById('mapping-panel');
+        const tourBubble = document.getElementById('tour-bubble');
+        const hueBubble = document.getElementById('hue-bubble');
+
+        if (tutorialOverlay) tutorialOverlay.classList.remove('active');
+        if (colorToolbar) colorToolbar.style.display = 'none';
+        if (controlPanel) controlPanel.style.display = 'none';
+        if (mappingPanel) mappingPanel.style.display = 'none';
+        if (tourBubble) tourBubble.style.display = 'none';
+        if (hueBubble) hueBubble.style.display = 'none';
+
+        // Also explicitly hide all tutorial child elements
+        const tutorialTitle = document.querySelector('.tutorial-title');
+        const tutorialInstruction = document.querySelector('.tutorial-instruction');
+        const tutorialCounter = document.getElementById('tutorial-counter');
+        const tutorialFeedback = document.getElementById('tutorial-feedback');
+        const startBtn = document.getElementById('tutorial-start-btn');
+
+        if (tutorialTitle) tutorialTitle.style.display = 'none';
+        if (tutorialInstruction) tutorialInstruction.style.display = 'none';
+        if (tutorialCounter) tutorialCounter.style.display = 'none';
+        if (tutorialFeedback) tutorialFeedback.style.display = 'none';
+        if (startBtn) startBtn.style.display = 'none';
+
         allowSpaceTesting = false;
         countdownActive = false;
         audio.play();

@@ -25,7 +25,7 @@ export default async function handler(req, res) {
           s.playback_seconds,
           s.keypress_count,
           s.hit_count,
-          s.negative_hit_count,
+          s.anticipatory_count,
           f.times_guessed,
           f.difficulty_rating,
           s.created_at,

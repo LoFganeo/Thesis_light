@@ -1795,27 +1795,28 @@ window.addEventListener('DOMContentLoaded', () => {
   }
   .tutorial-start {
     position: fixed;
-    top: 55%;
-    left: 50%;
-    transform: translate(-50%, -50%);
-    margin-top: 60px;
-    padding: 16px 40px;
-    font-size: 1.3em;
-    background: #4ecdc4;
-    color: #1a1a2e;
+    top: 28px;
+    right: 90px;
+    padding: 12px 24px;
+    font-size: 1.1em;
+    background: transparent;
+    color: #fff;
     border: none;
-    border-radius: 12px;
     cursor: pointer;
     font-weight: 700;
     transition: all 0.3s ease;
-    box-shadow: 0 6px 20px rgba(78, 205, 196, 0.4);
-    letter-spacing: 0.5px;
+    letter-spacing: 1px;
     text-transform: uppercase;
+    text-shadow: 0 0 10px rgba(255, 255, 255, 0.8),
+                 0 0 20px rgba(78, 205, 196, 0.6),
+                 0 0 30px rgba(78, 205, 196, 0.4),
+                 0 0 40px rgba(78, 205, 196, 0.3);
   }
   .tutorial-start:hover {
-    background: #5fe0d0;
-    transform: translate(-50%, -50%) translateY(-3px);
-    box-shadow: 0 8px 24px rgba(78, 205, 196, 0.5);
+    text-shadow: 0 0 15px rgba(255, 255, 255, 1),
+                 0 0 25px rgba(78, 205, 196, 0.8),
+                 0 0 35px rgba(78, 205, 196, 0.6),
+                 0 0 45px rgba(78, 205, 196, 0.4);
   }
   .tutorial-start.hidden {
     display: none;
@@ -2529,13 +2530,8 @@ window.addEventListener('DOMContentLoaded', () => {
     feedbackEl.textContent = '🎉 Tutorial Complete!';
     feedbackEl.className = 'hit';
 
-    // Hide counter and title/instruction
-    const tutorialTitle = tutorialOverlay.querySelector('.tutorial-title');
-    const tutorialInstruction = tutorialOverlay.querySelector('.tutorial-instruction');
-    const tutorialCounter = document.getElementById('tutorial-counter');
-    if (tutorialTitle) tutorialTitle.style.display = 'none';
-    if (tutorialInstruction) tutorialInstruction.style.display = 'none';
-    if (tutorialCounter) tutorialCounter.style.display = 'none';
+    // Keep all elements visible - don't hide title, instruction, or counter
+    // They will all be hidden together when play button is clicked
 
     // Show Start button
     const startBtn = document.getElementById('tutorial-start-btn');
@@ -2567,8 +2563,8 @@ window.addEventListener('DOMContentLoaded', () => {
 
   // Tutorial start experiment button handler
   document.getElementById('tutorial-start-btn').addEventListener('click', async () => {
-    // Hide tutorial overlay
-    tutorialOverlay.classList.remove('active');
+    // Keep tutorial overlay visible - don't hide it here
+    // It will be hidden when countdown finishes and playback starts
 
     // Ensure session is started
     const ready = await ensureSessionStarted();
@@ -2602,6 +2598,8 @@ window.addEventListener('DOMContentLoaded', () => {
           countdownOverlay.classList.remove('visible');
           countdownActive = false;
           allowSpaceTesting = false;
+          // Hide tutorial overlay when playback starts
+          tutorialOverlay.classList.remove('active');
           if (window.audio) {
             window.audio.play();
             markPlaybackStarted();
@@ -2613,6 +2611,8 @@ window.addEventListener('DOMContentLoaded', () => {
     } else {
       allowSpaceTesting = false;
       countdownActive = false;
+      // Hide tutorial overlay when playback starts
+      tutorialOverlay.classList.remove('active');
       if (window.audio) {
         window.audio.play();
         markPlaybackStarted();

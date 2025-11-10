@@ -63,6 +63,15 @@ let lastSpaceReleaseTime = 0;
 let allowSpaceTesting = true;
 let countdownActive = false;
 
+// Tutorial state
+let tutorialActive = false;
+let tutorialPassed = false;
+let tutorialHitCount = 0;
+let tutorialRequiredHits = 3;
+let tutorialStartTime = 0;
+let tutorialLastSwitchTime = 0;
+let tutorialSwitches = [];
+
 
 let auroraColors = [];
 let colorsInitialized = false;
@@ -1676,6 +1685,102 @@ window.addEventListener('DOMContentLoaded', () => {
     opacity: 1;
   }
 
+  /* Tutorial Overlay */
+  #tutorial-overlay {
+    position: fixed;
+    top: 0;
+    left: 0;
+    width: 100%;
+    height: 100%;
+    background: rgba(0, 0, 0, 0.85);
+    z-index: 9999;
+    display: none;
+    align-items: center;
+    justify-content: center;
+    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+  }
+  #tutorial-overlay.active {
+    display: flex;
+  }
+  #tutorial-content {
+    text-align: center;
+    color: #fff;
+    max-width: 600px;
+    padding: 40px;
+  }
+  .tutorial-title {
+    font-size: 2.5em;
+    font-weight: 200;
+    margin-bottom: 20px;
+    color: #4ecdc4;
+  }
+  .tutorial-instruction {
+    font-size: 1.2em;
+    margin-bottom: 30px;
+    color: #e0e0e0;
+  }
+  .tutorial-instruction strong {
+    color: #4ecdc4;
+    font-weight: 600;
+  }
+  #tutorial-feedback {
+    min-height: 80px;
+    font-size: 2em;
+    font-weight: 600;
+    margin: 20px 0;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+  }
+  #tutorial-feedback.hit {
+    color: #5fff5f;
+    animation: feedbackPulse 0.5s ease;
+  }
+  #tutorial-feedback.miss {
+    color: #ff5f5f;
+    animation: feedbackShake 0.5s ease;
+  }
+  @keyframes feedbackPulse {
+    0%, 100% { transform: scale(1); opacity: 1; }
+    50% { transform: scale(1.2); opacity: 0.8; }
+  }
+  @keyframes feedbackShake {
+    0%, 100% { transform: translateX(0); }
+    25% { transform: translateX(-10px); }
+    75% { transform: translateX(10px); }
+  }
+  #tutorial-counter {
+    font-size: 1.5em;
+    margin-top: 20px;
+    color: #4ecdc4;
+    font-weight: 600;
+  }
+  #tutorial-hit-count {
+    color: #fff;
+    font-size: 1.2em;
+  }
+  .tutorial-retry {
+    margin-top: 30px;
+    padding: 12px 30px;
+    font-size: 1.1em;
+    background: #4ecdc4;
+    color: #1a1a2e;
+    border: none;
+    border-radius: 8px;
+    cursor: pointer;
+    font-weight: 600;
+    transition: all 0.3s ease;
+    box-shadow: 0 4px 12px rgba(78, 205, 196, 0.3);
+  }
+  .tutorial-retry:hover {
+    background: #5fe0d0;
+    transform: translateY(-2px);
+    box-shadow: 0 6px 16px rgba(78, 205, 196, 0.4);
+  }
+  .tutorial-retry.hidden {
+    display: none;
+  }
+
   /* Feedback slider styling */
   .nicer-range { -webkit-appearance:none; appearance:none; width:80%; height:6px; background: linear-gradient(90deg,#4ecdc4,#8df1ea); border-radius: 4px; outline:none; }
   .nicer-range::-webkit-slider-thumb { -webkit-appearance:none; width:22px; height:22px; background:#fff; border:3px solid #4ecdc4; border-radius:50%; box-shadow:0 2px 8px rgba(0,0,0,0.4); cursor:pointer; }
@@ -2212,6 +2317,194 @@ window.addEventListener('DOMContentLoaded', () => {
   countdownOverlay.innerHTML = '<div id="countdown-number"></div>';
   document.body.appendChild(countdownOverlay);
 
+  // Tutorial Overlay
+  const tutorialOverlay = document.createElement('div');
+  tutorialOverlay.id = 'tutorial-overlay';
+  tutorialOverlay.innerHTML = `
+    <div id="tutorial-content">
+      <h2 class="tutorial-title">Tutorial</h2>
+      <p class="tutorial-instruction">Press <strong>SPACEBAR</strong> when you notice the visual pattern change!</p>
+      <div id="tutorial-feedback"></div>
+      <div id="tutorial-counter">Hits: <span id="tutorial-hit-count">0</span>/${tutorialRequiredHits}</div>
+      <button id="tutorial-retry-btn" class="tutorial-retry hidden">Retry Tutorial</button>
+    </div>
+  `;
+  document.body.appendChild(tutorialOverlay);
+
+  // Tutorial Functions
+  let tutorialModeListener = null;
+
+  function startTutorial() {
+    console.log('[Tutorial] Starting tutorial');
+    tutorialActive = true;
+    tutorialPassed = false;
+    tutorialHitCount = 0;
+    tutorialSwitches = [];
+
+    // Generate tutorial mode switches (20-30 seconds with 3-6 switches)
+    const tutorialDuration = 25; // seconds
+    const numSwitches = 4; // Ensure at least 4 opportunities
+    tutorialStartTime = 0;
+
+    for (let i = 0; i < numSwitches; i++) {
+      const switchTime = (tutorialDuration / (numSwitches + 1)) * (i + 1) + (Math.random() * 2 - 1);
+      tutorialSwitches.push(switchTime);
+    }
+    tutorialSwitches.sort((a, b) => a - b);
+    console.log('[Tutorial] Switch times:', tutorialSwitches);
+
+    // Show tutorial overlay
+    tutorialOverlay.classList.add('active');
+    document.getElementById('tutorial-hit-count').textContent = '0';
+    document.getElementById('tutorial-feedback').textContent = '';
+    document.getElementById('tutorial-retry-btn').classList.add('hidden');
+
+    // Set up tutorial audio segment
+    if (window.audio) {
+      window.audio.currentTime = 0;
+      tutorialStartTime = 0;
+      allowSpaceTesting = false;
+      window._tutorialMode = true;
+
+      // Set up automatic mode switching during tutorial
+      let nextSwitchIndex = 0;
+      tutorialModeListener = function() {
+        const currentTime = window.audio.currentTime;
+
+        // Auto-switch modes at designated times
+        if (nextSwitchIndex < tutorialSwitches.length) {
+          const nextSwitchTime = tutorialSwitches[nextSwitchIndex];
+          if (currentTime >= nextSwitchTime) {
+            // Toggle mode
+            const newMode = mappingMode === 'A' ? 'B' : 'A';
+            setMapping(newMode);
+            console.log('[Tutorial] Auto-switched to mode', newMode, 'at', currentTime);
+            nextSwitchIndex++;
+          }
+        }
+
+        // Auto-end tutorial after duration
+        if (currentTime >= tutorialDuration) {
+          if (tutorialHitCount < tutorialRequiredHits) {
+            // Show retry option
+            const feedbackEl = document.getElementById('tutorial-feedback');
+            feedbackEl.textContent = 'Tutorial incomplete. Try again?';
+            feedbackEl.className = 'miss';
+            document.getElementById('tutorial-retry-btn').classList.remove('hidden');
+            window.audio.pause();
+            window.audio.removeEventListener('timeupdate', tutorialModeListener);
+            tutorialActive = false;
+          }
+        }
+      };
+
+      window.audio.addEventListener('timeupdate', tutorialModeListener);
+    }
+  }
+
+  function checkTutorialHit() {
+    if (!tutorialActive || !window.audio) return;
+
+    const currentTime = window.audio.currentTime;
+    const feedbackEl = document.getElementById('tutorial-feedback');
+
+    // Check if hit is within window of any switch
+    let isHit = false;
+    let hitType = '';
+
+    for (let switchTime of tutorialSwitches) {
+      const timeDiff = Math.abs(currentTime - switchTime);
+      if (timeDiff <= 2.0) { // 2 second window
+        isHit = true;
+        tutorialHitCount++;
+        hitType = 'hit';
+
+        // Remove this switch from the array so it can't be hit twice
+        const idx = tutorialSwitches.indexOf(switchTime);
+        if (idx > -1) tutorialSwitches.splice(idx, 1);
+
+        break;
+      }
+    }
+
+    // Update feedback
+    if (isHit) {
+      feedbackEl.textContent = '✓ Hit!';
+      feedbackEl.className = 'hit';
+      console.log('[Tutorial] Hit! Count:', tutorialHitCount);
+    } else {
+      // Determine if too early or too late
+      const nextSwitch = tutorialSwitches.find(t => t > currentTime);
+      if (nextSwitch && (nextSwitch - currentTime) > 2.0) {
+        feedbackEl.textContent = 'Missed - Too early!';
+      } else {
+        feedbackEl.textContent = 'Missed - Too late!';
+      }
+      feedbackEl.className = 'miss';
+      console.log('[Tutorial] Miss at time:', currentTime);
+    }
+
+    // Update counter
+    document.getElementById('tutorial-hit-count').textContent = tutorialHitCount;
+
+    // Clear feedback after animation
+    setTimeout(() => {
+      feedbackEl.className = '';
+    }, 500);
+
+    // Check if tutorial complete
+    if (tutorialHitCount >= tutorialRequiredHits) {
+      setTimeout(() => {
+        completeTutorial();
+      }, 800);
+    }
+  }
+
+  function completeTutorial() {
+    console.log('[Tutorial] Tutorial passed!');
+    tutorialActive = false;
+    tutorialPassed = true;
+    window._tutorialMode = false;
+
+    // Clean up event listener
+    if (window.audio && tutorialModeListener) {
+      window.audio.removeEventListener('timeupdate', tutorialModeListener);
+      tutorialModeListener = null;
+    }
+
+    // Show success message
+    const feedbackEl = document.getElementById('tutorial-feedback');
+    feedbackEl.textContent = '🎉 Tutorial Complete!';
+    feedbackEl.className = 'hit';
+
+    // Hide overlay and proceed
+    setTimeout(() => {
+      tutorialOverlay.classList.remove('active');
+      if (window.audio) {
+        window.audio.pause();
+        window.audio.currentTime = 0;
+      }
+      // Show the mode compare overlay
+      showModeCompareOverlay(() => {
+        showGuidedBubbles();
+      });
+    }, 1500);
+  }
+
+  function failTutorial() {
+    console.log('[Tutorial] Tutorial failed - no retry for now');
+    // For now, we won't auto-fail - just let them keep trying
+  }
+
+  // Tutorial retry button handler
+  document.getElementById('tutorial-retry-btn').addEventListener('click', () => {
+    if (window.audio) {
+      window.audio.pause();
+      window.audio.currentTime = 0;
+    }
+    startTutorial();
+  });
+
   const modeCompareOverlay = document.createElement('div');
   modeCompareOverlay.id = 'mode-compare-overlay';
   modeCompareOverlay.classList.add('hidden');
@@ -2550,6 +2843,16 @@ window.addEventListener('DOMContentLoaded', () => {
         setPlayIcon();
         return;
       }
+
+      // Check if tutorial needs to be completed first
+      if (!tutorialPassed) {
+        startTutorial();
+        audio.play();
+        markPlaybackStarted();
+        setPlayIcon();
+        return;
+      }
+
       if (featureConfig.enableCountdown) {
         featureUsage.hadCountdown = true;
         const countdownNumber = document.getElementById('countdown-number');
@@ -2891,6 +3194,14 @@ window.addEventListener('DOMContentLoaded', () => {
       e.preventDefault();
       const now = Date.now();
       if (spaceHoldActive) return;
+
+      // Tutorial mode: check hit
+      if (tutorialActive) {
+        spaceHoldActive = true;
+        checkTutorialHit();
+        return;
+      }
+
       const bypassCooldown = allowSpaceTesting || countdownActive;
       if (!bypassCooldown && lastSpaceReleaseTime && (now - lastSpaceReleaseTime) < SPACE_COOLDOWN_MS) return;
       spaceHoldActive = true;

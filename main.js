@@ -1692,52 +1692,55 @@ window.addEventListener('DOMContentLoaded', () => {
     left: 0;
     width: 100%;
     height: 100%;
-    background: rgba(0, 0, 0, 0.25);
-    backdrop-filter: blur(8px);
-    -webkit-backdrop-filter: blur(8px);
+    background: transparent;
     z-index: 9999;
     display: none;
-    align-items: center;
-    justify-content: center;
     font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+    pointer-events: none;
   }
   #tutorial-overlay.active {
-    display: flex;
+    display: block;
   }
   #tutorial-content {
-    text-align: center;
-    color: #fff;
-    max-width: 600px;
-    padding: 40px;
-    background: rgba(0, 0, 0, 0.75);
-    border-radius: 20px;
-    backdrop-filter: blur(12px);
-    -webkit-backdrop-filter: blur(12px);
-    box-shadow: 0 8px 32px rgba(0, 0, 0, 0.4);
+    position: relative;
+    width: 100%;
+    height: 100%;
   }
   .tutorial-title {
-    font-size: 2.5em;
+    position: absolute;
+    top: 20px;
+    left: 50%;
+    transform: translateX(-50%);
+    font-size: 2em;
     font-weight: 200;
-    margin-bottom: 20px;
     color: #4ecdc4;
+    text-shadow: 2px 2px 8px rgba(0, 0, 0, 0.8);
+    margin: 0;
+    white-space: nowrap;
   }
   .tutorial-instruction {
-    font-size: 1.2em;
-    margin-bottom: 30px;
+    position: absolute;
+    top: 65px;
+    left: 50%;
+    transform: translateX(-50%);
+    font-size: 1.1em;
     color: #e0e0e0;
+    text-shadow: 2px 2px 8px rgba(0, 0, 0, 0.8);
+    margin: 0;
+    white-space: nowrap;
   }
   .tutorial-instruction strong {
     color: #4ecdc4;
     font-weight: 600;
   }
   #tutorial-feedback {
-    min-height: 80px;
-    font-size: 2em;
+    position: fixed;
+    top: 50%;
+    left: 50%;
+    transform: translate(-50%, -50%);
+    font-size: 3em;
     font-weight: 600;
-    margin: 20px 0;
-    display: flex;
-    align-items: center;
-    justify-content: center;
+    text-shadow: 3px 3px 12px rgba(0, 0, 0, 0.9);
   }
   #tutorial-feedback.hit {
     color: #5fff5f;
@@ -1748,19 +1751,22 @@ window.addEventListener('DOMContentLoaded', () => {
     animation: feedbackShake 0.5s ease;
   }
   @keyframes feedbackPulse {
-    0%, 100% { transform: scale(1); opacity: 1; }
-    50% { transform: scale(1.2); opacity: 0.8; }
+    0%, 100% { transform: translate(-50%, -50%) scale(1); opacity: 1; }
+    50% { transform: translate(-50%, -50%) scale(1.2); opacity: 0.8; }
   }
   @keyframes feedbackShake {
-    0%, 100% { transform: translateX(0); }
-    25% { transform: translateX(-10px); }
-    75% { transform: translateX(10px); }
+    0%, 100% { transform: translate(-50%, -50%) translateX(0); }
+    25% { transform: translate(-50%, -50%) translateX(-10px); }
+    75% { transform: translate(-50%, -50%) translateX(10px); }
   }
   #tutorial-counter {
+    position: fixed;
+    bottom: 24px;
+    right: 24px;
     font-size: 1.5em;
-    margin-top: 20px;
     color: #4ecdc4;
     font-weight: 600;
+    text-shadow: 2px 2px 8px rgba(0, 0, 0, 0.8);
   }
   #tutorial-hit-count {
     color: #fff;
@@ -2348,9 +2354,9 @@ window.addEventListener('DOMContentLoaded', () => {
     tutorialHitCount = 0;
     tutorialSwitches = [];
 
-    // Generate tutorial mode switches (20-30 seconds with 3-6 switches)
-    const tutorialDuration = 25; // seconds
-    const numSwitches = 4; // Ensure at least 4 opportunities
+    // Generate tutorial mode switches (extended duration for more practice)
+    const tutorialDuration = 45; // seconds - extended for more practice time
+    const numSwitches = 5; // Ensure at least 5 opportunities
     tutorialStartTime = 0;
 
     for (let i = 0; i < numSwitches; i++) {
@@ -2464,10 +2470,11 @@ window.addEventListener('DOMContentLoaded', () => {
     // Update counter
     document.getElementById('tutorial-hit-count').textContent = tutorialHitCount;
 
-    // Clear feedback after animation
+    // Clear feedback after animation - text disappears completely
     setTimeout(() => {
+      feedbackEl.textContent = '';
       feedbackEl.className = '';
-    }, 500);
+    }, 1500);
 
     // Check if tutorial complete
     if (tutorialHitCount >= tutorialRequiredHits) {

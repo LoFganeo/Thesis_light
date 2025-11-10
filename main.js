@@ -1692,7 +1692,9 @@ window.addEventListener('DOMContentLoaded', () => {
     left: 0;
     width: 100%;
     height: 100%;
-    background: rgba(0, 0, 0, 0.85);
+    background: rgba(0, 0, 0, 0.25);
+    backdrop-filter: blur(8px);
+    -webkit-backdrop-filter: blur(8px);
     z-index: 9999;
     display: none;
     align-items: center;
@@ -1707,6 +1709,11 @@ window.addEventListener('DOMContentLoaded', () => {
     color: #fff;
     max-width: 600px;
     padding: 40px;
+    background: rgba(0, 0, 0, 0.75);
+    border-radius: 20px;
+    backdrop-filter: blur(12px);
+    -webkit-backdrop-filter: blur(12px);
+    box-shadow: 0 8px 32px rgba(0, 0, 0, 0.4);
   }
   .tutorial-title {
     font-size: 2.5em;
@@ -2365,6 +2372,16 @@ window.addEventListener('DOMContentLoaded', () => {
       tutorialStartTime = 0;
       allowSpaceTesting = false;
       window._tutorialMode = true;
+      window._previewLights = false; // Disable preview lights during tutorial
+
+      // Ensure audio is playing
+      if (window.audio.paused) {
+        window.audio.play().then(() => {
+          console.log('[Tutorial] Audio started playing');
+        }).catch(err => {
+          console.error('[Tutorial] Audio play failed:', err);
+        });
+      }
 
       // Set up automatic mode switching during tutorial
       let nextSwitchIndex = 0;

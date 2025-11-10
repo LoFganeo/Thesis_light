@@ -17,30 +17,8 @@ module.exports = async (request, response) => {
 
     const client = await db.connect();
 
-    await client.sql`
-      CREATE TABLE IF NOT EXISTS thesis_logs (
-        id BIGSERIAL PRIMARY KEY,
-        participant_id TEXT NOT NULL,
-        session_id TEXT NOT NULL,
-        audio_time DOUBLE PRECISION,
-        current_mode TEXT,
-        last_switch_time DOUBLE PRECISION,
-        delta_time DOUBLE PRECISION
-      );
-    `;
-
-    // Ensure legacy tables comply with the NOT NULL + TEXT requirement
-    try {
-      await client.sql`ALTER TABLE thesis_logs ALTER COLUMN session_id TYPE TEXT USING session_id::TEXT;`;
-    } catch (_) {
-      // ignore if the column already has the desired type
-    }
-    await client.sql`UPDATE thesis_logs SET session_id = CONCAT('legacy-', id) WHERE session_id IS NULL;`;
-    try {
-      await client.sql`ALTER TABLE thesis_logs ALTER COLUMN session_id SET NOT NULL;`;
-    } catch (_) {
-      // ignore if constraint already enforced
-    }
+    // DDL operations removed - tables should already exist
+    // If you need to create tables, run migrations separately
 
     const at = typeof audioTime === 'number' ? audioTime : null;
     const lst = typeof lastSwitchTime === 'number' ? lastSwitchTime : null;

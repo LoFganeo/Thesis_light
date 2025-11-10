@@ -23,44 +23,7 @@ module.exports = async (request, response) => {
   try {
     client = await db.connect();
 
-    // Ensure table/constraint exist (run outside transaction to avoid abort-on-error behaviour)
-    await client.sql`
-      CREATE TABLE IF NOT EXISTS thesis_sessions (
-        session_id TEXT PRIMARY KEY,
-        participant_id TEXT NOT NULL,
-        created_at TIMESTAMPTZ DEFAULT NOW(),
-        status TEXT NOT NULL DEFAULT 'pending',
-        last_event_at TIMESTAMPTZ DEFAULT NOW(),
-        playback_seconds DOUBLE PRECISION DEFAULT 0,
-        keypress_count INTEGER DEFAULT 0,
-        hit_count INTEGER DEFAULT 0,
-        anticipatory_count INTEGER DEFAULT 0,
-        valid BOOLEAN DEFAULT FALSE,
-        email_hash TEXT,
-        action TEXT,
-        sent_count INTEGER,
-        dropped_count INTEGER,
-        had_countdown BOOLEAN,
-        meets_playback BOOLEAN,
-        meets_keypress BOOLEAN,
-        meets_hits BOOLEAN,
-        zero_hit_but_pressed BOOLEAN,
-        all_negative_hits BOOLEAN
-      );
-    `;
-    await client.sql`ALTER TABLE thesis_sessions ALTER COLUMN session_id TYPE TEXT USING session_id::TEXT;`.catch(() => {});
-    await client.sql`ALTER TABLE thesis_sessions ALTER COLUMN session_id SET NOT NULL;`.catch(() => {});
-    await client.sql`ALTER TABLE thesis_sessions ADD CONSTRAINT thesis_sessions_participant_unique UNIQUE (participant_id);`.catch(() => {});
-    await client.sql`ALTER TABLE thesis_sessions ADD COLUMN IF NOT EXISTS email_hash TEXT;`.catch(() => {});
-    await client.sql`ALTER TABLE thesis_sessions ADD COLUMN IF NOT EXISTS action TEXT;`.catch(() => {});
-    await client.sql`ALTER TABLE thesis_sessions ADD COLUMN IF NOT EXISTS sent_count INTEGER;`.catch(() => {});
-    await client.sql`ALTER TABLE thesis_sessions ADD COLUMN IF NOT EXISTS dropped_count INTEGER;`.catch(() => {});
-    await client.sql`ALTER TABLE thesis_sessions ADD COLUMN IF NOT EXISTS had_countdown BOOLEAN;`.catch(() => {});
-    await client.sql`ALTER TABLE thesis_sessions ADD COLUMN IF NOT EXISTS meets_playback BOOLEAN;`.catch(() => {});
-    await client.sql`ALTER TABLE thesis_sessions ADD COLUMN IF NOT EXISTS meets_keypress BOOLEAN;`.catch(() => {});
-    await client.sql`ALTER TABLE thesis_sessions ADD COLUMN IF NOT EXISTS meets_hits BOOLEAN;`.catch(() => {});
-    await client.sql`ALTER TABLE thesis_sessions ADD COLUMN IF NOT EXISTS zero_hit_but_pressed BOOLEAN;`.catch(() => {});
-    await client.sql`ALTER TABLE thesis_sessions ADD COLUMN IF NOT EXISTS all_negative_hits BOOLEAN;`.catch(() => {});
+    // DDL operations removed - tables should already exist
 
     const sessionId = randomUUID();
     await client.sql`BEGIN`;

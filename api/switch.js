@@ -21,25 +21,7 @@ module.exports = async (request, response) => {
     }
 
     const client = await db.connect();
-    await client.sql`
-      CREATE TABLE IF NOT EXISTS thesis_switches (
-        id BIGSERIAL PRIMARY KEY,
-        session_id TEXT NOT NULL,
-        switch_time DOUBLE PRECISION,
-        difficulty TEXT,
-        mapping_id TEXT,
-        delta_e DOUBLE PRECISION,
-        entropy DOUBLE PRECISION,
-        dist_to_beat DOUBLE PRECISION
-      );
-    `;
-
-    try {
-      await client.sql`ALTER TABLE thesis_switches ALTER COLUMN session_id TYPE TEXT USING session_id::TEXT;`;
-    } catch (_) {}
-    try {
-      await client.sql`ALTER TABLE thesis_switches ALTER COLUMN session_id SET NOT NULL;`;
-    } catch (_) {}
+    // DDL operations removed - tables should already exist
 
     const sid = String(sessionId);
     const st = typeof switchTime === 'number' ? switchTime : null;

@@ -72,6 +72,7 @@ let tutorialRequiredHits = 3;
 let tutorialStartTime = 0;
 let tutorialLastSwitchTime = 0;
 let tutorialSwitches = [];
+let tutorialSwitchTimers = []; // setTimeout timers for precise switch timing
 
 
 let auroraColors = [];
@@ -2420,22 +2421,29 @@ window.addEventListener('DOMContentLoaded', () => {
         });
       }
 
-      // Set up automatic mode switching during tutorial
-      let nextSwitchIndex = 0;
+      // Set up automatic mode switching during tutorial using setTimeout for precision
+      // Clear any existing timers first
+      tutorialSwitchTimers.forEach(timer => clearTimeout(timer));
+      tutorialSwitchTimers = [];
+
+      // Schedule all tutorial switches using setTimeout (like in experiment)
+      // This ensures precise timing instead of relying on imprecise timeupdate events
+      tutorialSwitches.forEach((switchTime) => {
+        const delayMs = switchTime * 1000; // Convert seconds to milliseconds
+        const timer = setTimeout(() => {
+          if (!tutorialActive) return;
+
+          const newMode = mappingMode === 'A' ? 'B' : 'A';
+          setMapping(newMode);
+          console.log('[Tutorial] Auto-switched to mode', newMode, 'at', window.audio.currentTime, 'scheduled at', switchTime);
+        }, delayMs);
+
+        tutorialSwitchTimers.push(timer);
+      });
+
+      // Set up listener only for checking tutorial end
       tutorialModeListener = function() {
         const currentTime = window.audio.currentTime;
-
-        // Auto-switch modes at designated times
-        if (nextSwitchIndex < tutorialSwitches.length) {
-          const nextSwitchTime = tutorialSwitches[nextSwitchIndex];
-          if (currentTime >= nextSwitchTime) {
-            // Toggle mode
-            const newMode = mappingMode === 'A' ? 'B' : 'A';
-            setMapping(newMode);
-            console.log('[Tutorial] Auto-switched to mode', newMode, 'at', currentTime);
-            nextSwitchIndex++;
-          }
-        }
 
         // Auto-end tutorial after duration
         if (currentTime >= tutorialDuration) {
@@ -2448,6 +2456,10 @@ window.addEventListener('DOMContentLoaded', () => {
             window.audio.pause();
             window.audio.removeEventListener('timeupdate', tutorialModeListener);
             tutorialActive = false;
+
+            // Clear any pending switch timers
+            tutorialSwitchTimers.forEach(timer => clearTimeout(timer));
+            tutorialSwitchTimers = [];
           }
         }
       };
@@ -2535,6 +2547,10 @@ window.addEventListener('DOMContentLoaded', () => {
       window.audio.removeEventListener('timeupdate', tutorialModeListener);
       tutorialModeListener = null;
     }
+
+    // Clear any pending switch timers
+    tutorialSwitchTimers.forEach(timer => clearTimeout(timer));
+    tutorialSwitchTimers = [];
 
     // Show success message and Start button
     const feedbackEl = document.getElementById('tutorial-feedback');

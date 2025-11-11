@@ -1776,7 +1776,10 @@ window.addEventListener('DOMContentLoaded', () => {
     font-size: 1.2em;
   }
   .tutorial-retry {
-    margin-top: 30px;
+    position: absolute;
+    bottom: 150px;
+    left: 50%;
+    transform: translateX(-50%);
     padding: 12px 30px;
     font-size: 1.1em;
     background: #4ecdc4;
@@ -1788,10 +1791,11 @@ window.addEventListener('DOMContentLoaded', () => {
     transition: all 0.3s ease;
     box-shadow: 0 4px 12px rgba(78, 205, 196, 0.3);
     pointer-events: auto; /* Override parent's pointer-events: none */
+    z-index: 10000; /* Ensure button is above everything */
   }
   .tutorial-retry:hover {
     background: #5fe0d0;
-    transform: translateY(-2px);
+    transform: translateX(-50%) translateY(-2px);
     box-shadow: 0 6px 16px rgba(78, 205, 196, 0.4);
   }
   .tutorial-retry.hidden {

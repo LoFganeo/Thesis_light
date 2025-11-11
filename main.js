@@ -3267,8 +3267,8 @@ window.addEventListener('DOMContentLoaded', () => {
       ? 'This session did not meet the analysis criteria and was not recorded.'
       : 'Your feedback has been saved.';
 
-    // Prolific completion code (replace with your actual code from Prolific)
-    const PROLIFIC_COMPLETION_CODE = "C1234ABC";
+    // Prolific completion code
+    const PROLIFIC_COMPLETION_CODE = "CK4CKH95";
 
     overlay.innerHTML = `
       <div class="welcome-content">

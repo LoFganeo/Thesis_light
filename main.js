@@ -2428,17 +2428,24 @@ window.addEventListener('DOMContentLoaded', () => {
 
       // Schedule all tutorial switches using setTimeout (like in experiment)
       // This ensures precise timing instead of relying on imprecise timeupdate events
+      // IMPORTANT: Calculate delay relative to current audio position
       tutorialSwitches.forEach((switchTime) => {
-        const delayMs = switchTime * 1000; // Convert seconds to milliseconds
-        const timer = setTimeout(() => {
-          if (!tutorialActive) return;
+        const currentAudioTime = window.audio.currentTime;
+        const remainingTime = switchTime - currentAudioTime;
 
-          const newMode = mappingMode === 'A' ? 'B' : 'A';
-          setMapping(newMode);
-          console.log('[Tutorial] Auto-switched to mode', newMode, 'at', window.audio.currentTime, 'scheduled at', switchTime);
-        }, delayMs);
+        // Only schedule if switch is in the future
+        if (remainingTime > 0) {
+          const delayMs = remainingTime * 1000; // Convert remaining seconds to milliseconds
+          const timer = setTimeout(() => {
+            if (!tutorialActive) return;
 
-        tutorialSwitchTimers.push(timer);
+            const newMode = mappingMode === 'A' ? 'B' : 'A';
+            setMapping(newMode);
+            console.log('[Tutorial] Auto-switched to mode', newMode, 'at', window.audio.currentTime, 'scheduled at', switchTime);
+          }, delayMs);
+
+          tutorialSwitchTimers.push(timer);
+        }
       });
 
       // Set up listener only for checking tutorial end

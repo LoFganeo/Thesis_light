@@ -2501,34 +2501,8 @@ window.addEventListener('DOMContentLoaded', () => {
         feedbackEl.textContent = '⚠️ -1 Hit (2 misses)';
         console.log('[Tutorial] Penalty applied! New hit count:', tutorialHitCount);
       } else {
-        // Determine if too early or too late based on NEAREST switch
-        let nearestSwitch = null;
-        let minDistance = Infinity;
-
-        for (let switchTime of tutorialSwitches) {
-          const dist = Math.abs(currentTime - switchTime);
-          if (dist < minDistance) {
-            minDistance = dist;
-            nearestSwitch = switchTime;
-          }
-        }
-
-        if (nearestSwitch !== null) {
-          const diff = currentTime - nearestSwitch;
-          if (diff < 0) {
-            // Before switch (anticipatory response)
-            feedbackEl.textContent = 'Missed - Too early!';
-          } else if (diff > 2.0) {
-            // More than 2s after nearest switch
-            feedbackEl.textContent = 'Missed - Too late!';
-          } else {
-            // Between 0-2s after switch but not registered as hit?
-            // This shouldn't happen, but if it does, it's technically too late
-            feedbackEl.textContent = 'Missed - Too late!';
-          }
-        } else {
-          feedbackEl.textContent = 'Missed!';
-        }
+        // Simple miss feedback - no complex early/late logic
+        feedbackEl.textContent = 'Missed!';
       }
       feedbackEl.className = 'miss';
     }

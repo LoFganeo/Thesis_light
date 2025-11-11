@@ -1786,6 +1786,7 @@ window.addEventListener('DOMContentLoaded', () => {
     font-weight: 600;
     transition: all 0.3s ease;
     box-shadow: 0 4px 12px rgba(78, 205, 196, 0.3);
+    pointer-events: auto; /* Override parent's pointer-events: none */
   }
   .tutorial-retry:hover {
     background: #5fe0d0;

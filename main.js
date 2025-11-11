@@ -67,6 +67,7 @@ let tutorialActive = false;
 let tutorialPassed = false;
 let tutorialHitCount = 0;
 let tutorialMissCount = 0; // Track consecutive misses
+let tutorialTotalKeypresses = 0; // Track total keypresses for hit rate calculation
 let tutorialRequiredHits = 3;
 let tutorialStartTime = 0;
 let tutorialLastSwitchTime = 0;
@@ -2389,6 +2390,7 @@ window.addEventListener('DOMContentLoaded', () => {
     tutorialPassed = false;
     tutorialHitCount = 0;
     tutorialMissCount = 0;
+    tutorialTotalKeypresses = 0;
     tutorialLastHitSwitchTime = -1;
     tutorialSwitches = [];
 
@@ -2461,10 +2463,17 @@ window.addEventListener('DOMContentLoaded', () => {
 
         // Auto-end tutorial after duration
         if (currentTime >= tutorialDuration) {
-          if (tutorialHitCount < tutorialRequiredHits) {
-            // Show retry option
+          // Calculate hit rate at tutorial end
+          const finalHitRate = tutorialTotalKeypresses > 0 ? (tutorialHitCount / tutorialTotalKeypresses) : 0;
+
+          if (tutorialHitCount < tutorialRequiredHits || finalHitRate < 0.30) {
+            // Show retry option with helpful message
             const feedbackEl = document.getElementById('tutorial-feedback');
-            feedbackEl.textContent = 'Tutorial incomplete. Try again?';
+            if (tutorialHitCount < tutorialRequiredHits) {
+              feedbackEl.textContent = `Need ${tutorialRequiredHits} hits. Please carefully observe the difference between the two modes.`;
+            } else {
+              feedbackEl.textContent = `Hit rate too low (${Math.round(finalHitRate * 100)}%). Please carefully observe the difference between the two modes.`;
+            }
             feedbackEl.className = 'miss';
             document.getElementById('tutorial-retry-btn').classList.remove('hidden');
             window.audio.pause();
@@ -2484,6 +2493,9 @@ window.addEventListener('DOMContentLoaded', () => {
 
   function checkTutorialHit() {
     if (!tutorialActive || !window.audio) return;
+
+    // Count every keypress for hit rate calculation
+    tutorialTotalKeypresses++;
 
     const currentTime = window.audio.currentTime;
     const feedbackEl = document.getElementById('tutorial-feedback');
@@ -2544,7 +2556,9 @@ window.addEventListener('DOMContentLoaded', () => {
     }, 1500);
 
     // Check if tutorial complete
-    if (tutorialHitCount >= tutorialRequiredHits) {
+    // Require both: 3 hits AND hit rate >= 30%
+    const hitRate = tutorialTotalKeypresses > 0 ? (tutorialHitCount / tutorialTotalKeypresses) : 0;
+    if (tutorialHitCount >= tutorialRequiredHits && hitRate >= 0.30) {
       setTimeout(() => {
         completeTutorial();
       }, 800);
@@ -3195,7 +3209,7 @@ window.addEventListener('DOMContentLoaded', () => {
       <div class="welcome-content">
         <h1 class="welcome-title">Feedback</h1>
         <p class="welcome-text">How many times do you think the mode switched?</p>
-        <input type="range" min="1" max="50" step="1" value="25" id="fb-count" class="nicer-range" />
+        <input type="range" min="1" max="100" step="1" value="50" id="fb-count" class="nicer-range" />
         <div id="fb-count-wrap" style="margin-top:10px;font-size:24px;font-weight:700;letter-spacing:1px"><span id="fb-count-val"></span></div>
         <div style="margin-top:18px"></div>
         <p class="welcome-text">How difficult was it?</p>
@@ -3682,7 +3696,7 @@ window.addEventListener('DOMContentLoaded', () => {
       <div class="welcome-content">
         <h1 class="welcome-title">Welcome</h1>
         <p class="welcome-text"><strong>Your Task:</strong> Press <strong style="color:#4ecdc4;">SPACEBAR</strong> whenever you notice the visual pattern change</p>
-        <p class="welcome-text"><strong>Duration:</strong> ~4 minutes</p>
+        <p class="welcome-text"><strong>Duration:</strong> ~3 minutes</p>
         <p class="welcome-text"><strong>Equipment:</strong> Headphones required</p>
         <button class="welcome-button">Start</button>
       </div>

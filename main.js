@@ -3277,27 +3277,33 @@ window.addEventListener('DOMContentLoaded', () => {
 
         ${!released ? `
           <div style="margin: 40px 0;">
-            <p class="welcome-text"><strong>Please copy this completion code and paste it into Prolific:</strong></p>
-            <div style="background: rgba(78,205,196,0.2); padding: 30px; border-radius: 16px; margin: 20px 0;">
-              <code id="completion-code" style="font-size: 48px; font-weight: 700; color: #4ecdc4; letter-spacing: 4px;">
+            <p class="welcome-text" style="font-size: 20px; margin-bottom: 25px;">
+              <strong>Please click the button below to complete your submission:</strong>
+            </p>
+            <a href="https://app.prolific.com/submissions/complete?cc=${PROLIFIC_COMPLETION_CODE}"
+               class="welcome-button"
+               style="display: inline-block; text-decoration: none; font-size: 20px; padding: 18px 50px; margin-bottom: 20px;">
+              Return to Prolific →
+            </a>
+          </div>
+
+          <div style="margin: 30px 0; padding: 25px; background: rgba(255,255,255,0.05); border-radius: 12px; border: 1px dashed rgba(78,205,196,0.3);">
+            <p class="welcome-text" style="font-size: 14px; color: #999; margin-bottom: 15px;">
+              <em>If the button above doesn't work, please copy this code and paste it into Prolific manually:</em>
+            </p>
+            <div style="background: rgba(78,205,196,0.15); padding: 20px; border-radius: 10px; margin: 15px 0;">
+              <code id="completion-code" style="font-size: 32px; font-weight: 700; color: #4ecdc4; letter-spacing: 3px;">
                 ${PROLIFIC_COMPLETION_CODE}
               </code>
             </div>
-            <button class="welcome-button" onclick="
+            <button class="welcome-button" style="font-size: 14px; padding: 10px 25px; background: rgba(78,205,196,0.3);" onclick="
               navigator.clipboard.writeText('${PROLIFIC_COMPLETION_CODE}').then(() => {
                 this.textContent = '✓ Copied!';
                 this.style.background = '#5fff5f';
-                setTimeout(() => { this.textContent = 'Copy Code'; this.style.background = ''; }, 2000);
+                setTimeout(() => { this.textContent = 'Copy Code'; this.style.background = 'rgba(78,205,196,0.3)'; }, 2000);
               })
             ">Copy Code</button>
           </div>
-
-          <p class="welcome-text" style="margin-top: 30px;">
-            <a href="https://app.prolific.com/submissions/complete?cc=${PROLIFIC_COMPLETION_CODE}"
-               style="color: #4ecdc4; text-decoration: underline; font-size: 18px;">
-              Or click here to return to Prolific automatically →
-            </a>
-          </p>
         ` : ''}
       </div>`;
     document.body.appendChild(overlay);

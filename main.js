@@ -2467,11 +2467,20 @@ window.addEventListener('DOMContentLoaded', () => {
     let hitType = '';
 
     for (let switchTime of tutorialSwitches) {
-      const timeDiff = Math.abs(currentTime - switchTime);
-      if (timeDiff <= 2.0) { // 2 second window
+      const timeDiff = currentTime - switchTime;  // Positive = after switch, Negative = before switch
+      // Match experiment logic: -2.0 to +2.0 window
+      if (timeDiff >= -2.0 && timeDiff <= 2.0) {
         isHit = true;
         tutorialHitCount++;
-        hitType = 'hit';
+
+        // Distinguish between anticipatory and normal hits (like in experiment)
+        if (timeDiff < 0) {
+          hitType = 'anticipatory';
+          console.log('[Tutorial] Anticipatory hit! (before switch)', timeDiff.toFixed(2), 's');
+        } else {
+          hitType = 'normal';
+          console.log('[Tutorial] Normal hit! (after switch)', timeDiff.toFixed(2), 's');
+        }
 
         // Remove this switch from the array so it can't be hit twice
         const idx = tutorialSwitches.indexOf(switchTime);
@@ -2498,12 +2507,32 @@ window.addEventListener('DOMContentLoaded', () => {
         feedbackEl.textContent = '⚠️ -1 Hit (2 misses)';
         console.log('[Tutorial] Penalty applied! New hit count:', tutorialHitCount);
       } else {
-        // Determine if too early or too late
-        const nextSwitch = tutorialSwitches.find(t => t > currentTime);
-        if (nextSwitch && (nextSwitch - currentTime) > 2.0) {
-          feedbackEl.textContent = 'Missed - Too early!';
+        // Determine if too early or too late based on NEAREST switch
+        let nearestSwitch = null;
+        let minDistance = Infinity;
+
+        for (let switchTime of tutorialSwitches) {
+          const dist = Math.abs(currentTime - switchTime);
+          if (dist < minDistance) {
+            minDistance = dist;
+            nearestSwitch = switchTime;
+          }
+        }
+
+        if (nearestSwitch !== null) {
+          const diff = currentTime - nearestSwitch;
+          if (diff < -2.0) {
+            // More than 2s before nearest switch
+            feedbackEl.textContent = 'Missed - Too early!';
+          } else if (diff > 2.0) {
+            // More than 2s after nearest switch
+            feedbackEl.textContent = 'Missed - Too late!';
+          } else {
+            // Within window but shouldn't happen (safety)
+            feedbackEl.textContent = 'Missed!';
+          }
         } else {
-          feedbackEl.textContent = 'Missed - Too late!';
+          feedbackEl.textContent = 'Missed!';
         }
       }
       feedbackEl.className = 'miss';

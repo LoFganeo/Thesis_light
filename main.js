@@ -71,6 +71,7 @@ let tutorialMissCount = 0; // Track consecutive misses
 let tutorialRequiredHits = 3;
 let tutorialStartTime = 0;
 let tutorialLastSwitchTime = 0;
+let tutorialLastHitSwitchTime = -1; // Track which switch was last hit to prevent duplicates
 let tutorialSwitches = [];
 let tutorialSwitchTimers = []; // setTimeout timers for precise switch timing
 
@@ -2385,6 +2386,7 @@ window.addEventListener('DOMContentLoaded', () => {
     tutorialPassed = false;
     tutorialHitCount = 0;
     tutorialMissCount = 0;
+    tutorialLastHitSwitchTime = -1;
     tutorialSwitches = [];
 
     // Generate tutorial mode switches (extended duration for more practice)
@@ -2482,25 +2484,26 @@ window.addEventListener('DOMContentLoaded', () => {
     const currentTime = window.audio.currentTime;
     const feedbackEl = document.getElementById('tutorial-feedback');
 
-    // Check if hit is within window of any switch
     let isHit = false;
-    let hitType = '';
 
-    for (let switchTime of tutorialSwitches) {
-      const timeDiff = currentTime - switchTime;  // Positive = after switch, Negative = before switch
+    // Use lastSwitchTime (actual switch time) instead of planned time
+    // This accounts for setTimeout delays and ensures accurate RT calculation
+    if (typeof lastSwitchTime === 'number' && lastSwitchTime >= 0) {
+      const timeDiff = currentTime - lastSwitchTime;  // Positive = after switch, Negative = before switch
+
       // Match experiment logic: ONLY count hits AFTER switch (0 to 2.0 seconds)
       // Per thesis document line 222: "Hit: RT ∈ [0, 2000] ms"
       // Anticipatory responses (RT < 0) are NOT counted as hits
       if (timeDiff >= 0 && timeDiff <= 2.0) {
-        isHit = true;
-        tutorialHitCount++;
-        console.log('[Tutorial] Hit! RT =', timeDiff.toFixed(2), 's after switch');
-
-        // Remove this switch from the array so it can't be hit twice
-        const idx = tutorialSwitches.indexOf(switchTime);
-        if (idx > -1) tutorialSwitches.splice(idx, 1);
-
-        break;
+        // Check if this switch was already hit
+        if (tutorialLastHitSwitchTime !== lastSwitchTime) {
+          isHit = true;
+          tutorialHitCount++;
+          tutorialLastHitSwitchTime = lastSwitchTime; // Mark this switch as consumed
+          console.log('[Tutorial] Hit! RT =', timeDiff.toFixed(3), 's after switch (actual)');
+        } else {
+          console.log('[Tutorial] Duplicate hit ignored for same switch');
+        }
       }
     }
 

@@ -2468,19 +2468,13 @@ window.addEventListener('DOMContentLoaded', () => {
 
     for (let switchTime of tutorialSwitches) {
       const timeDiff = currentTime - switchTime;  // Positive = after switch, Negative = before switch
-      // Match experiment logic: -2.0 to +2.0 window
-      if (timeDiff >= -2.0 && timeDiff <= 2.0) {
+      // Match experiment logic: ONLY count hits AFTER switch (0 to 2.0 seconds)
+      // Per thesis document line 222: "Hit: RT ∈ [0, 2000] ms"
+      // Anticipatory responses (RT < 0) are NOT counted as hits
+      if (timeDiff >= 0 && timeDiff <= 2.0) {
         isHit = true;
         tutorialHitCount++;
-
-        // Distinguish between anticipatory and normal hits (like in experiment)
-        if (timeDiff < 0) {
-          hitType = 'anticipatory';
-          console.log('[Tutorial] Anticipatory hit! (before switch)', timeDiff.toFixed(2), 's');
-        } else {
-          hitType = 'normal';
-          console.log('[Tutorial] Normal hit! (after switch)', timeDiff.toFixed(2), 's');
-        }
+        console.log('[Tutorial] Hit! RT =', timeDiff.toFixed(2), 's after switch');
 
         // Remove this switch from the array so it can't be hit twice
         const idx = tutorialSwitches.indexOf(switchTime);
@@ -2521,15 +2515,16 @@ window.addEventListener('DOMContentLoaded', () => {
 
         if (nearestSwitch !== null) {
           const diff = currentTime - nearestSwitch;
-          if (diff < -2.0) {
-            // More than 2s before nearest switch
+          if (diff < 0) {
+            // Before switch (anticipatory response)
             feedbackEl.textContent = 'Missed - Too early!';
           } else if (diff > 2.0) {
             // More than 2s after nearest switch
             feedbackEl.textContent = 'Missed - Too late!';
           } else {
-            // Within window but shouldn't happen (safety)
-            feedbackEl.textContent = 'Missed!';
+            // Between 0-2s after switch but not registered as hit?
+            // This shouldn't happen, but if it does, it's technically too late
+            feedbackEl.textContent = 'Missed - Too late!';
           }
         } else {
           feedbackEl.textContent = 'Missed!';

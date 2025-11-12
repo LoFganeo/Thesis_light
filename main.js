@@ -5,25 +5,25 @@ let shapeAccum = [0,0,0,0,0]; // 新添加，用于形态惯性
 let modeBAmbientAccum = [0,0,0,0,0];
 let modeBPrevFinal = [0,0,0,0,0];
 const decayRate = 0.92; // energy decay factor in mode B
-const PROLIFIC_PARAMS = (() => {
+const QUALTRICS_PARAMS = (() => {
   try {
     const rawQuery = window.location ? (window.location.search || '') : '';
-    console.log('[Prolific] raw query:', rawQuery);
+    console.log('[Qualtrics] raw query:', rawQuery);
     const params = new URLSearchParams(rawQuery);
-    console.log('[Prolific] params string:', params.toString());
-    const prolificPID = params.get('PROLIFIC_PID');
-    const studyID = params.get('STUDY_ID');
-    const sessionID = params.get('SESSION_ID');
-    console.log('[Prolific] extracted PROLIFIC_PID/STUDY_ID/SESSION_ID:', prolificPID, studyID, sessionID);
+    console.log('[Qualtrics] params string:', params.toString());
+    const userIDRaw = params.get('userID');
+    const emailRaw = params.get('email');
+    const userID = userIDRaw ? userIDRaw.trim() : null;
+    const email = emailRaw ? emailRaw.trim() : null;
+    console.log('[Qualtrics] extracted userID/email:', userID, email);
     return {
-      prolificPID: prolificPID ? prolificPID.trim() : null,
-      studyID: studyID ? studyID.trim() : null,
-      sessionID: sessionID ? sessionID.trim() : null,
-      hasParams: !!(prolificPID && prolificPID.trim().length)
+      userID: userID && userID.length ? userID : null,
+      email: email && email.length ? email : null,
+      hasParams: !!(userIDRaw && userIDRaw.trim().length)
     };
   } catch (err) {
-    console.warn('Failed parsing Prolific params', err);
-    return { prolificPID: null, studyID: null, sessionID: null, hasParams: false };
+    console.warn('Failed parsing Qualtrics params', err);
+    return { userID: null, email: null, hasParams: false };
   }
 })();
 let sessionStartOptions = null;
@@ -47,9 +47,10 @@ const MAPPING_A_CLIP_PIVOT = 1.2;
 const MAPPING_A_CLIP_RATIO = 0.55;
 const HIGH_FREQ_SENSITIVITY = 0.58;
 const LOW_END_SENSITIVITY = 0.55;
+const QUALTRICS_SURVEY_URL = 'https://nyu.qualtrics.com/jfe/form/SV_eCWOIY9iGjukpUO';
 // === Global energy–audio sync offset ===
 let offsetMs = 0;
-let participantId = null; // set from Prolific params
+let participantId = null; // set from Qualtrics params
 let sessionId = null; // set by start-session API
 let lastSwitchTime = 0;   // updated on mode switch
 
@@ -3280,57 +3281,22 @@ window.addEventListener('DOMContentLoaded', () => {
     const message = released
       ? 'This session did not meet the analysis criteria and was not recorded.'
       : 'Your feedback has been saved.';
-
-    // Prolific completion code
-    const PROLIFIC_COMPLETION_CODE = "CK4CKH95";
-
     overlay.innerHTML = `
       <div class="welcome-content">
         <h1 class="welcome-title">Thank you for participating!</h1>
         <p class="welcome-text">${message}</p>
-
-        ${!released ? `
-          <div style="margin: 40px 0;">
-            <p class="welcome-text" style="font-size: 20px; margin-bottom: 25px;">
-              <strong>Please click the button below to complete your submission:</strong>
-            </p>
-            <a href="https://app.prolific.com/submissions/complete?cc=${PROLIFIC_COMPLETION_CODE}"
-               class="welcome-button"
-               style="display: inline-block; text-decoration: none; font-size: 20px; padding: 18px 50px; margin-bottom: 20px;">
-              Return to Prolific →
-            </a>
-          </div>
-
-          <div style="margin: 30px 0; padding: 25px; background: rgba(255,255,255,0.05); border-radius: 12px; border: 1px dashed rgba(78,205,196,0.3);">
-            <p class="welcome-text" style="font-size: 14px; color: #999; margin-bottom: 15px;">
-              <em>If the button above doesn't work, please copy this code and paste it into Prolific manually:</em>
-            </p>
-            <div style="background: rgba(78,205,196,0.15); padding: 20px; border-radius: 10px; margin: 15px 0;">
-              <code id="completion-code" style="font-size: 32px; font-weight: 700; color: #4ecdc4; letter-spacing: 3px;">
-                ${PROLIFIC_COMPLETION_CODE}
-              </code>
-            </div>
-            <button class="welcome-button" style="font-size: 14px; padding: 10px 25px; background: rgba(78,205,196,0.3);" onclick="
-              navigator.clipboard.writeText('${PROLIFIC_COMPLETION_CODE}').then(() => {
-                this.textContent = '✓ Copied!';
-                this.style.background = '#5fff5f';
-                setTimeout(() => { this.textContent = 'Copy Code'; this.style.background = 'rgba(78,205,196,0.3)'; }, 2000);
-              })
-            ">Copy Code</button>
-          </div>
-        ` : ''}
       </div>`;
     document.body.appendChild(overlay);
   }
 
-  function showProlificRedirect(message) {
-    ['welcome-overlay','thanks-overlay','prolific-redirect-overlay'].forEach(id => {
+  function showQualtricsRedirect(message) {
+    ['welcome-overlay','thanks-overlay','qualtrics-redirect-overlay'].forEach(id => {
       const el = document.getElementById(id);
       if (el && el.parentNode) el.parentNode.removeChild(el);
     });
 
     const overlay = document.createElement('div');
-    overlay.id = 'prolific-redirect-overlay';
+    overlay.id = 'qualtrics-redirect-overlay';
     overlay.style.position = 'fixed';
     overlay.style.top = '0';
     overlay.style.left = '0';
@@ -3351,7 +3317,9 @@ window.addEventListener('DOMContentLoaded', () => {
       <div class="welcome-content">
         <h1 class="welcome-title">Access Required</h1>
         <p class="welcome-text">${message}</p>
-        <p class="welcome-text">Please access this experiment through your Prolific study link.</p>
+        <p class="welcome-text">
+          <a href="${QUALTRICS_SURVEY_URL}" target="_blank" rel="noopener" style="color:#4ecdc4;text-decoration:underline;">Go to the Qualtrics survey</a>
+        </p>
       </div>
     `;
     document.body.appendChild(overlay);
@@ -3580,7 +3548,7 @@ window.addEventListener('DOMContentLoaded', () => {
     if (sessionId) return true;
     if (sessionStartPromise) return sessionStartPromise;
     if (!participantId) {
-      alert('Participant information missing. Please reload the page through the Prolific link.');
+      alert('Participant information missing. Please reload the page through the Qualtrics link.');
       return false;
     }
     const opts = sessionStartOptions ? { ...sessionStartOptions } : {};
@@ -3595,7 +3563,7 @@ window.addEventListener('DOMContentLoaded', () => {
         const message = String(error?.message || '');
         if (/participant already has an active session/i.test(message)) {
           sessionStartOptions = null;
-          showProlificRedirect('This Prolific ID has already completed the experiment.');
+          showQualtricsRedirect('Records show this email has already tested. Please return to Qualtrics and use a new survey link.');
         } else {
           sessionStartOptions = null;
           alert('Failed to start the session. Please try again.');
@@ -3680,15 +3648,15 @@ window.addEventListener('DOMContentLoaded', () => {
     }
   }
   function setupWelcomeScreen() {
-    const isAuto = PROLIFIC_PARAMS && PROLIFIC_PARAMS.hasParams;
-    console.log('[Prolific] setupWelcomeScreen mode ->', isAuto ? 'auto' : 'manual');
+    const isAuto = QUALTRICS_PARAMS && QUALTRICS_PARAMS.hasParams;
+    console.log('[Qualtrics] setupWelcomeScreen mode ->', isAuto ? 'auto' : 'manual');
 
-    if (!isAuto || !PROLIFIC_PARAMS.prolificPID) {
-      showProlificRedirect('This experiment is accessible only through Prolific.');
+    if (!isAuto || !QUALTRICS_PARAMS.userID) {
+      showQualtricsRedirect('This experiment is accessible only after completing the Qualtrics intake survey.');
       return;
     }
 
-    participantId = PROLIFIC_PARAMS.prolificPID;
+    participantId = QUALTRICS_PARAMS.userID;
 
     const overlay = document.createElement('div');
     overlay.id = 'welcome-overlay';
@@ -3697,8 +3665,8 @@ window.addEventListener('DOMContentLoaded', () => {
         <h1 class="welcome-title">Welcome</h1>
         <p class="welcome-text"><strong>Your Task:</strong> Press <strong style="color:#4ecdc4;">SPACEBAR</strong> whenever you notice the visual pattern change</p>
         <p class="welcome-text"><strong>Duration:</strong> ~3 minutes</p>
-        <p class="welcome-text"><strong>Equipment:</strong> Headphones required</p>
-        <button class="welcome-button">Start</button>
+        <p class="welcome-text"><strong>Equipment:</strong> Headphones recommended</p>
+        <button class="welcome-button">Enter</button>
       </div>
     `;
 
@@ -3711,14 +3679,23 @@ window.addEventListener('DOMContentLoaded', () => {
         if (button.disabled) return;
         button.disabled = true;
         button.classList.add('disabled');
-        console.log('[Prolific] Proceed pressed for PROLIFIC_PID:', participantId);
+        console.log('[Qualtrics] Proceed pressed for userID:', participantId);
         try {
           if (!sessionStartOptions) {
-            sessionStartOptions = {
-              prolificPID: PROLIFIC_PARAMS.prolificPID,
-              studyID: PROLIFIC_PARAMS.studyID,
-              sessionID: PROLIFIC_PARAMS.sessionID
-            };
+            sessionStartOptions = {};
+            const email = QUALTRICS_PARAMS.email;
+            if (email) {
+              const trimmed = email.trim();
+              if (trimmed.length) {
+                sessionStartOptions.email = trimmed;
+              }
+              try {
+                sessionStartOptions.emailHash = await hashEmail(trimmed);
+              } catch (err) {
+                console.warn('Failed to hash email for session start', err);
+                delete sessionStartOptions.emailHash;
+              }
+            }
           }
           applyInitialSlotMapping();
           overlay.classList.add('hidden');
@@ -3727,12 +3704,12 @@ window.addEventListener('DOMContentLoaded', () => {
             showModeCompareOverlay(showGuidedBubbles);
           }, 400);
         } catch (error) {
-          console.error('[Prolific] Welcome proceed failed', error);
+          console.error('[Qualtrics] Welcome proceed failed', error);
           sessionStartOptions = null;
           overlay.classList.add('hidden');
           setTimeout(() => {
             if (overlay.parentNode) overlay.parentNode.removeChild(overlay);
-            showProlificRedirect('Unable to initialize the experience. Please refresh the page and try again.');
+            showQualtricsRedirect('Unable to initialize the experience. Please refresh the page and try again.');
           }, 400);
         }
       };
@@ -3740,7 +3717,7 @@ window.addEventListener('DOMContentLoaded', () => {
     overlay.addEventListener('keydown', (e) => {
       if (e.key === 'Enter') {
         e.preventDefault();
-        console.log('[Prolific] Enter key captured on welcome overlay');
+        console.log('[Qualtrics] Enter key captured on welcome overlay');
         handleProceed();
       }
     });
@@ -3748,8 +3725,8 @@ window.addEventListener('DOMContentLoaded', () => {
     setTimeout(() => { button.focus(); }, 50);
   }
 
-  window._prolificParams = PROLIFIC_PARAMS;
-  console.log('[Prolific] window._prolificParams set to:', window._prolificParams);
+  window._qualtricsParams = QUALTRICS_PARAMS;
+  console.log('[Qualtrics] window._qualtricsParams set to:', window._qualtricsParams);
   setupWelcomeScreen();
 
 }); // end DOMContentLoaded
